@@ -38,6 +38,11 @@ jobs:
             cpu: armv8-a
             triple: aarch64-linux-android
             extra: ''
+          - abi: armeabi-v7a
+            arch: arm
+            cpu: armv7-a
+            triple: armv7a-linux-androideabi
+            extra: ''
           - abi: x86_64
             arch: x86_64
             cpu: x86-64

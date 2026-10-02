@@ -27,7 +27,7 @@ ASSETS = os.path.join(ROOT, 'app', 'src', 'main', 'assets')
 WORK = os.path.join(ROOT, 'build', 'binaries')
 
 REPO = 'cash94/TorrStream-AndroidServer'
-ABIS = ['arm64-v8a', 'x86_64']
+ABIS = ['arm64-v8a', 'armeabi-v7a', 'x86_64']
 # Что из исходников сервера нужно для запуска (как scripts в package.json → pkg)
 SERVER_FILES = ['server.js', 'module-loader.js', 'windows-pause.js', 'package.json', 'package-lock.json']
 SERVER_DIRS = ['lib', 'middleware', 'services', 'routes', 'workers']

@@ -30,7 +30,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JNI = os.path.join(ROOT, 'app', 'src', 'main', 'jniLibs')
 WORK = os.path.join(ROOT, 'build', 'termux')
 MIRROR = 'https://packages.termux.dev/apt/termux-main'
-TERMUX_ARCH = {'arm64-v8a': 'aarch64', 'x86_64': 'x86_64'}
+TERMUX_ARCH = {'arm64-v8a': 'aarch64', 'armeabi-v7a': 'arm', 'x86_64': 'x86_64'}
 ROOT_PACKAGE = 'nodejs-lts'
 PREFIX = 'data/data/com.termux/files/usr/'
 
