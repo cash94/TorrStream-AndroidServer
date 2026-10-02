@@ -16,6 +16,7 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -32,6 +33,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusView: TextView
     private lateinit var startStop: Button
     private lateinit var batteryBtn: Button
+    private lateinit var tsInstallBtn: Button
+    private lateinit var tsEnabledBox: CheckBox
+    private lateinit var tsRemoveBtn: Button
     private lateinit var logView: TextView
     private lateinit var logScroll: ScrollView
 
@@ -81,7 +85,7 @@ class MainActivity : AppCompatActivity() {
         addressView = text(24f, Color.parseColor("#FF8C00"), bold = true)
         root.addView(addressView)
         root.addView(text(13f, Color.parseColor("#9A9AA6")).apply {
-            text = "Введите его в TorrStream на телевизоре. Адрес TorrServer (порт 8090) телевизор подставит сам."
+            text = "Введите его в TorrStream на телевизоре. Если на телефоне работает TorrServer, его адрес (порт 8090) телевизор подставит сам."
             setPadding(0, dp(4), 0, dp(16))
         })
 
@@ -102,6 +106,36 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { requestIgnoreBattery() }
         }
         root.addView(batteryBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        // TorrServer — по желанию: можно пользоваться другим (TorrServe, на компьютере)
+        root.addView(text(18f, bold = true).apply {
+            text = "TorrServer на телефоне"
+            setPadding(0, dp(22), 0, dp(4))
+        })
+        root.addView(text(13f, Color.parseColor("#9A9AA6")).apply {
+            text = "Необязательно: телевизор может работать с TorrServer на другом устройстве — он указывается в его настройках."
+            setPadding(0, 0, 0, dp(8))
+        })
+        tsInstallBtn = Button(this).apply {
+            text = "Установить TorrServer (~64 МБ)"
+            setOnClickListener { installTorrServer() }
+        }
+        root.addView(tsInstallBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        tsEnabledBox = CheckBox(this).apply {
+            text = "Запускать вместе с сервером"
+            setTextColor(Color.WHITE)
+            isChecked = TorrServerInstaller.enabled(this@MainActivity)
+            setOnCheckedChangeListener { _, on ->
+                TorrServerInstaller.setEnabled(this@MainActivity, on)
+                ServerService.torrServer(this@MainActivity, on)
+            }
+        }
+        root.addView(tsEnabledBox)
+        tsRemoveBtn = Button(this).apply {
+            text = "Удалить TorrServer"
+            setOnClickListener { removeTorrServer() }
+        }
+        root.addView(tsRemoveBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         root.addView(text(14f, Color.parseColor("#9A9AA6")).apply {
             text = "Журнал"
@@ -129,16 +163,54 @@ class MainActivity : AppCompatActivity() {
         else ips.joinToString("\n") { "http://$it:${Env.SERVER_PORT}" }
 
         val tsProgress = TorrServerInstaller.progress
-        val ts = if (tsProgress >= 0) "Скачиваю… $tsProgress%" else ServerService.torrServerState
+        val ts = when {
+            tsProgress >= 0 -> "Скачиваю… $tsProgress%"
+            TorrServerInstaller.lastError != null -> "Ошибка загрузки: ${TorrServerInstaller.lastError}"
+            !ServerService.running && TorrServerInstaller.isInstalled(this) ->
+                "Установлен ${TorrServerInstaller.version(this) ?: ""}"
+            !ServerService.running -> "Не установлен"
+            else -> ServerService.torrServerState
+        }
         statusView.text = "Сервер TorrStream: ${ServerService.serverState}\n" +
             "TorrServer: $ts\n" +
             "Работа в фоне: ${if (ignoringBattery()) "разрешена" else "ограничена экономией батареи"}"
 
         startStop.text = if (ServerService.running) "Остановить сервер" else "Запустить сервер"
+
+        val installed = TorrServerInstaller.isInstalled(this)
+        val downloading = tsProgress >= 0
+        tsInstallBtn.visibility = if (!installed && !downloading) android.view.View.VISIBLE else android.view.View.GONE
+        tsEnabledBox.visibility = if (installed) android.view.View.VISIBLE else android.view.View.GONE
+        tsRemoveBtn.visibility = if (installed && !downloading) android.view.View.VISIBLE else android.view.View.GONE
         batteryBtn.visibility = if (ignoringBattery()) android.view.View.GONE else android.view.View.VISIBLE
 
         val log = ServerService.logText()
         if (logView.text.toString() != log) logView.text = log
+    }
+
+    private fun installTorrServer() {
+        val ctx = applicationContext
+        Thread({
+            try {
+                TorrServerInstaller.install(ctx)
+                ServerService.log("TorrServer ${TorrServerInstaller.version(ctx)} установлен")
+                if (TorrServerInstaller.enabled(ctx)) ServerService.torrServer(ctx, true)
+            } catch (e: Exception) {
+                TorrServerInstaller.lastError = e.message ?: e.javaClass.simpleName
+                ServerService.log("Ошибка загрузки TorrServer: ${e.message}")
+            }
+        }, "ts-install").start()
+        handler.postDelayed({ refresh() }, 300)
+    }
+
+    private fun removeTorrServer() {
+        val ctx = applicationContext
+        ServerService.torrServer(ctx, false)
+        Thread({
+            Thread.sleep(1000)   // процесс должен успеть завершиться, иначе файл занят
+            TorrServerInstaller.uninstall(ctx)
+            ServerService.log("TorrServer удалён")
+        }, "ts-remove").start()
     }
 
     private fun ignoringBattery(): Boolean {

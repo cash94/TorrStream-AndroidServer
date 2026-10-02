@@ -49,6 +49,20 @@ object TorrServerInstaller {
     fun version(ctx: Context): String? =
         ctx.getSharedPreferences("torrserver", Context.MODE_PRIVATE).getString("version", null)
 
+    /** «Запускать TorrServer вместе с сервером» */
+    fun enabled(ctx: Context) =
+        ctx.getSharedPreferences("torrserver", Context.MODE_PRIVATE).getBoolean("enabled", true)
+
+    fun setEnabled(ctx: Context, on: Boolean) =
+        ctx.getSharedPreferences("torrserver", Context.MODE_PRIVATE).edit().putBoolean("enabled", on).apply()
+
+    fun uninstall(ctx: Context) {
+        binary(ctx).delete()
+        ctx.getSharedPreferences("torrserver", Context.MODE_PRIVATE).edit().remove("version").apply()
+    }
+
+    @Volatile var lastError: String? = null
+
     /** Версия TorrServer, отвечающего на порту, или null */
     fun runningVersion(): String? = try {
         val c = open("http://127.0.0.1:${Env.TORRSERVER_PORT}/echo", 1500, 1500)
@@ -60,6 +74,7 @@ object TorrServerInstaller {
     /** Скачивает последнюю версию. Блокирующий — звать не с главного потока */
     fun install(ctx: Context) {
         val suffix = Env.torrServerAsset ?: throw IOException("Процессор телефона не поддерживается")
+        lastError = null
         progress = 0
         try {
             val json = open(RELEASES, 20000, 60000).let { c ->

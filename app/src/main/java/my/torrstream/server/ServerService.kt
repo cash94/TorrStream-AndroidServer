@@ -37,10 +37,17 @@ class ServerService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIF_ID, buildNotification())
-        if (!running) {
-            running = true
-            acquireLocks()
-            Thread({ startAll() }, "server-start").start()
+        when (intent?.action) {
+            // TorrServer установили или включили «запускать вместе с сервером», пока сервер работает
+            ACTION_TS_START -> if (running && tsProc == null && !tsExternal) {
+                Thread({ startTorrServerIfWanted() }, "ts-start").start()
+            }
+            ACTION_TS_STOP -> stopTorrServer()
+            else -> if (!running) {
+                running = true
+                acquireLocks()
+                Thread({ startAll() }, "server-start").start()
+            }
         }
         return START_STICKY
     }
@@ -63,28 +70,38 @@ class ServerService : Service() {
 
     private fun startAll() {
         val ctx = applicationContext
-        // 1. TorrServer: чужой на порту — пользуемся им; иначе свой (скачаем при первом запуске)
-        val external = TorrServerInstaller.runningVersion()
-        tsExternal = external != null
-        if (external != null) {
-            torrServerState = "Работает (уже был запущен): $external"
-            log("TorrServer уже работает на порту ${Env.TORRSERVER_PORT} ($external) — свою копию не запускаем")
-        } else {
-            if (!TorrServerInstaller.isInstalled(ctx)) {
-                torrServerState = "Скачиваю…"
-                log("Скачиваю TorrServer…")
-                try {
-                    TorrServerInstaller.install(ctx)
-                    log("TorrServer ${TorrServerInstaller.version(ctx)} скачан")
-                } catch (e: Exception) {
-                    torrServerState = "Ошибка загрузки: ${e.message}"
-                    log("Ошибка загрузки TorrServer: ${e.message}")
-                }
-            }
-            if (TorrServerInstaller.isInstalled(ctx) && running) startTorrServer()
-        }
+        // 1. TorrServer — по желанию (установка и флажок на экране приложения)
+        startTorrServerIfWanted()
         // 2. Сервер TorrStream
         if (running) startNode()
+    }
+
+    /**
+     * TorrServer на телефоне — по желанию. Уже работает чужой на порту 8090 (TorrServe) —
+     * пользуемся им. Свой — только если установлен и включён «запускать вместе с
+     * сервером». Иначе телевизор работает с TorrServer, указанным в его настройках.
+     */
+    private fun startTorrServerIfWanted() {
+        val ctx = applicationContext
+        val external = TorrServerInstaller.runningVersion()
+        tsExternal = external != null
+        when {
+            external != null -> {
+                torrServerState = "Работает (уже был запущен): $external"
+                log("TorrServer уже работает на порту ${Env.TORRSERVER_PORT} ($external) — свою копию не запускаем")
+            }
+            !TorrServerInstaller.isInstalled(ctx) -> torrServerState = "Не установлен"
+            !TorrServerInstaller.enabled(ctx) -> torrServerState = "Установлен, не запускается (выключено)"
+            running -> startTorrServer()
+        }
+    }
+
+    private fun stopTorrServer() {
+        val p = tsProc ?: return
+        tsProc = null      // onExit не станет перезапускать
+        try { p.destroy() } catch (_: Exception) { }
+        torrServerState = "Остановлен"
+        log("TorrServer остановлен")
     }
 
     private fun startTorrServer() {
@@ -310,6 +327,9 @@ class ServerService : Service() {
         private const val LOG_LINES = 400
         private const val LOG_FILE_MAX = 2L * 1024 * 1024
 
+        const val ACTION_TS_START = "my.torrstream.server.TS_START"
+        const val ACTION_TS_STOP = "my.torrstream.server.TS_STOP"
+
         @Volatile var running = false; private set
         @Volatile var serverState = "Остановлен"; private set
         @Volatile var torrServerState = "Остановлен"; private set
@@ -351,6 +371,14 @@ class ServerService : Service() {
 
         fun stop(ctx: Context) {
             ctx.stopService(Intent(ctx, ServerService::class.java))
+        }
+
+        /** Запустить/остановить TorrServer при уже работающем сервере */
+        fun torrServer(ctx: Context, start: Boolean) {
+            if (!running) return
+            val intent = Intent(ctx, ServerService::class.java).setAction(if (start) ACTION_TS_START else ACTION_TS_STOP)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(intent)
+            else ctx.startService(intent)
         }
     }
 }
