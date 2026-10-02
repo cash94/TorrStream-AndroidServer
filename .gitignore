@@ -7,3 +7,4 @@ local.properties
 # Бинарники собираются/скачиваются скриптом tools/fetch-binaries.py — в git не храним
 app/src/main/jniLibs/
 dist/
+app/src/main/assets/server.zip
