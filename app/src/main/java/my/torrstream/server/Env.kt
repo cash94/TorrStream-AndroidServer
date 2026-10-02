@@ -10,16 +10,24 @@ import java.net.NetworkInterface
 /**
  * Пути, адреса и сеть — всё, что нужно для запуска сервера TorrStream на телефоне.
  *
- * Сервер (статическая сборка Node, pkg linuxstatic), ffmpeg и ffprobe лежат в APK как
- * lib*.so (jniLibs): система распаковывает их в nativeLibraryDir, откуда разрешён
- * запуск. TorrServer скачивается отдельно в память приложения (TorrServerInstaller).
+ * Node (сборка Termux под bionic), его библиотеки, ffmpeg и ffprobe (сборка NDK) лежат в
+ * APK как lib*.so (jniLibs): система распаковывает их в nativeLibraryDir, откуда
+ * разрешён запуск. Код сервера — assets/server.zip. TorrServer скачивается отдельно в
+ * память приложения (TorrServerInstaller).
+ *
+ * Сборки для обычного Linux (Node на musl, ffmpeg на glibc) не годятся: в процессе
+ * приложения их убивает фильтр системных вызовов Android (SIGSYS, код выхода 159).
  */
 object Env {
     const val SERVER_PORT = 3000
     const val TORRSERVER_PORT = 8090
 
-    private fun nativeDir(ctx: Context) = File(ctx.applicationInfo.nativeLibraryDir)
-    fun serverBinary(ctx: Context) = File(nativeDir(ctx), "libtorrstream.so")
+    fun nativeDir(ctx: Context) = File(ctx.applicationInfo.nativeLibraryDir)
+    fun node(ctx: Context) = File(nativeDir(ctx), "libnode.so")
+    /** Ссылки на библиотеки Node с настоящими именами — для LD_LIBRARY_PATH */
+    fun nodeLibDir(ctx: Context) = File(ctx.filesDir, "node-lib")
+    /** Распакованный код сервера (assets/server.zip) */
+    fun serverApp(ctx: Context) = File(ctx.filesDir, "server-app")
     fun ffmpeg(ctx: Context) = File(nativeDir(ctx), "libffmpeg.so")
     fun ffprobe(ctx: Context) = File(nativeDir(ctx), "libffprobe.so")
 

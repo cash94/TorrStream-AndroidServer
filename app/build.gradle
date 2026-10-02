@@ -9,14 +9,15 @@ android {
 
     defaultConfig {
         applicationId "my.torrstream.server"
-        minSdkVersion 23
+        // 24: Node из Termux собран под API 24
+        minSdkVersion 24
         // 28, не выше: сервер, ffmpeg и TorrServer — исполняемые файлы, и TorrServer
         // скачивается в память приложения. Запускать такие файлы приложению с
         // targetSdk 29+ Android 10 запрещает (W^X).
         //noinspection ExpiredTargetSdkVersion
         targetSdkVersion 28
-        versionCode 1
-        versionName "0.1.0"
+        versionCode 2
+        versionName "0.2.0"
     }
 
     buildTypes {

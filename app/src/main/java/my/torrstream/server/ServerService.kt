@@ -14,8 +14,10 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import android.system.Os
 import java.io.File
 import java.io.FileOutputStream
+import java.util.zip.ZipInputStream
 
 /**
  * Сервер TorrStream на телефоне: TorrServer + сервер TorrStream (Node) + ffmpeg, к
@@ -105,10 +107,19 @@ class ServerService : Service() {
 
     private fun startNode() {
         val ctx = applicationContext
-        // Отладка: files/server.bin, если есть, запускается вместо встроенного сервера
-        val bin = File(ctx.filesDir, "server.bin").takeIf { it.canExecute() } ?: Env.serverBinary(ctx)
+        try {
+            prepareNodeLibs(ctx)
+            prepareServerApp(ctx)
+        } catch (e: Exception) {
+            serverState = "Не удалось подготовить сервер: ${e.message}"
+            log("Подготовка сервера: ${e.message}")
+            return
+        }
+        // Отладка: files/server.bin, если есть, запускается вместо node
+        val debugBin = File(ctx.filesDir, "server.bin").takeIf { it.canExecute() }
+        val bin = debugBin ?: Env.node(ctx)
         if (!bin.exists()) {
-            serverState = "Нет файла сервера в APK"
+            serverState = "Нет node в APK"
             log("Нет ${bin.path}")
             return
         }
@@ -119,14 +130,21 @@ class ServerService : Service() {
             ?.map { it.trim() }?.filter { it.isNotEmpty() && !it.startsWith("#") }.orEmpty()
         val extraEnv = File(ctx.filesDir, "server.env").takeIf { it.isFile }?.readLines()
             ?.map { it.trim() }?.filter { it.contains('=') && !it.startsWith("#") }.orEmpty()
-        val pb = ProcessBuilder(listOf(bin.absolutePath) + extraArgs).directory(home).redirectErrorStream(true)
+        val script = File(Env.serverApp(ctx), "server.js").absolutePath
+        val cmd = if (debugBin != null) listOf(bin.absolutePath) + extraArgs
+        else listOf(bin.absolutePath) + extraArgs + script
+        val pb = ProcessBuilder(cmd).directory(home).redirectErrorStream(true)
         pb.environment().apply {
             put("PORT", Env.SERVER_PORT.toString())
             put("TORRSTREAM_HOME", home.absolutePath)
             put("HLS_DIR", Env.hlsDir(ctx).absolutePath)
             put("FFMPEG_PATH", Env.ffmpeg(ctx).absolutePath)
             put("FFPROBE_PATH", Env.ffprobe(ctx).absolutePath)
-            put("TORRSTREAM_DNS", Env.dnsServers(ctx))
+            // Библиотеки Node (libssl.so.3, libicuuc.so.78…) — по ссылкам из prepareNodeLibs
+            put("LD_LIBRARY_PATH", Env.nodeLibDir(ctx).absolutePath)
+            // Корневые сертификаты — системные Android: у OpenSSL из Termux свой путь,
+            // которого на телефоне нет. DNS — системный (bionic), TORRSTREAM_DNS не нужен
+            put("SSL_CERT_DIR", "/system/etc/security/cacerts")
             put("HOME", home.absolutePath)
             put("TMPDIR", ctx.cacheDir.absolutePath)
             // io_uring приложениям Android запрещён фильтром системных вызовов (seccomp):
@@ -146,6 +164,57 @@ class ServerService : Service() {
         serverState = "Работает"
         log("Сервер TorrStream запущен")
         pump(p, "") { code -> onExit(p, code, "Сервер TorrStream", nodeRestarts) { startNode() } }
+    }
+
+    /**
+     * Библиотеки Node лежат в nativeLibraryDir под закодированными именами
+     * (tools/fetch-node.py): libdep_<hex имени>.so — сама библиотека,
+     * libdeplink_<hex ссылки>_<hex цели>.so — пустая метка символической ссылки.
+     * Здесь — ссылки с настоящими именами, по ним их находит загрузчик (LD_LIBRARY_PATH).
+     */
+    private fun prepareNodeLibs(ctx: Context) {
+        val native = Env.nativeDir(ctx)
+        val dir = Env.nodeLibDir(ctx)
+        dir.deleteRecursively()
+        dir.mkdirs()
+        fun decode(hex: String) = String(hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray())
+        native.listFiles().orEmpty().forEach { f ->
+            val n = f.name
+            when {
+                n.startsWith("libdeplink_") -> {
+                    val (link, target) = n.removePrefix("libdeplink_").removeSuffix(".so").split('_')
+                    val real = File(native, "libdep_$target.so")
+                    if (real.exists()) Os.symlink(real.absolutePath, File(dir, decode(link)).absolutePath)
+                }
+                n.startsWith("libdep_") ->
+                    Os.symlink(f.absolutePath, File(dir, decode(n.removePrefix("libdep_").removeSuffix(".so"))).absolutePath)
+            }
+        }
+    }
+
+    /** Код сервера из assets/server.zip — заново при каждой новой установке APK */
+    private fun prepareServerApp(ctx: Context) {
+        val dir = Env.serverApp(ctx)
+        val stamp = ctx.packageManager.getPackageInfo(ctx.packageName, 0).lastUpdateTime.toString()
+        val marker = File(dir, ".installed")
+        if (marker.isFile && marker.readText() == stamp) return
+        dir.deleteRecursively()
+        dir.mkdirs()
+        ZipInputStream(ctx.assets.open("server.zip")).use { zip ->
+            while (true) {
+                val e = zip.nextEntry ?: break
+                val out = File(dir, e.name)
+                // Защита от «../» в именах архива
+                if (!out.canonicalPath.startsWith(dir.canonicalPath)) continue
+                if (e.isDirectory) out.mkdirs()
+                else {
+                    out.parentFile?.mkdirs()
+                    out.outputStream().use { zip.copyTo(it) }
+                }
+            }
+        }
+        marker.writeText(stamp)
+        log("Код сервера распакован")
     }
 
     /** Вывод процесса — в журнал (его обязательно вычитывать: полный буфер останавливает процесс) */
