@@ -1,0 +1,62 @@
+plugins {
+    id 'com.android.application'
+    id 'kotlin-android'
+}
+
+android {
+    compileSdk 34
+    namespace 'my.torrstream.server'
+
+    defaultConfig {
+        applicationId "my.torrstream.server"
+        minSdkVersion 23
+        // 28, не выше: сервер, ffmpeg и TorrServer — исполняемые файлы, и TorrServer
+        // скачивается в память приложения. Запускать такие файлы приложению с
+        // targetSdk 29+ Android 10 запрещает (W^X).
+        //noinspection ExpiredTargetSdkVersion
+        targetSdkVersion 28
+        versionCode 1
+        versionName "0.1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    // Отдельный APK на архитектуру: в каждом свои сервер (Node) и ffmpeg, по ~200 МБ
+    // распакованных — общий APK весил бы вдвое больше
+    splits {
+        abi {
+            enable true
+            reset()
+            include 'arm64-v8a', 'x86_64'
+            universalApk false
+        }
+    }
+
+    packagingOptions {
+        jniLibs {
+            // Бинарники лежат в jniLibs как lib*.so: система распаковывает их в
+            // nativeLibraryDir, откуда разрешён запуск. Без legacy-упаковки они
+            // остались бы внутри APK, и запускать было бы нечего
+            useLegacyPackaging true
+            // Это не библиотеки, а статические программы — strip им не нужен
+            keepDebugSymbols += ['**/*.so']
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.12.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+}

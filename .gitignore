@@ -1,0 +1,8 @@
+.gradle/
+build/
+app/build/
+local.properties
+*.iml
+.idea/
+# Бинарники собираются/скачиваются скриптом tools/fetch-binaries.py — в git не храним
+app/src/main/jniLibs/

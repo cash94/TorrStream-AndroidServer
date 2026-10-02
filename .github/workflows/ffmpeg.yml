@@ -1,0 +1,98 @@
+# FFmpeg для Android — сборка через NDK, под bionic.
+#
+# Статические сборки для обычного Linux (johnvansickle, BtbN, Jellyfin) на Android не
+# работают в процессе приложения: glibc при старте делает set_robust_list (а новая —
+# ещё rseq), и фильтр системных вызовов Android (seccomp) убивает процесс SIGSYS.
+# Сборка под bionic пользуется только разрешёнными вызовами.
+#
+# Без внешних библиотек: встроенные демультиплексоры, кодек AAC, HLS, HTTP — всё, что
+# нужно серверу TorrStream (перепаковка в HLS, звук в AAC, проба файлов). С FFmpeg 7.1+
+# есть фильтр dovi_rpu — сервер вырезает им Dolby Vision для телевизоров.
+#
+# Результат — ассеты релиза ffmpeg-<версия>: ffmpeg-<abi>, ffprobe-<abi>.
+# Их забирает tools/fetch-binaries.py.
+name: ffmpeg
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Версия FFmpeg (ffmpeg.org/releases)
+        default: '8.0'
+
+permissions:
+  contents: write
+
+env:
+  FFMPEG_VERSION: ${{ github.event.inputs.version || '8.0' }}
+  API: 23
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - abi: arm64-v8a
+            arch: aarch64
+            cpu: armv8-a
+            triple: aarch64-linux-android
+            extra: ''
+          - abi: x86_64
+            arch: x86_64
+            cpu: x86-64
+            triple: x86_64-linux-android
+            # ассемблер x86 требует nasm, а x86_64 нужен только эмулятору
+            extra: --disable-x86asm
+    steps:
+      - name: Source
+        run: |
+          curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o ffmpeg.tar.xz
+          tar -xJf ffmpeg.tar.xz
+          mv "ffmpeg-${FFMPEG_VERSION}" src
+
+      - name: Configure
+        working-directory: src
+        run: |
+          NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          ./configure \
+            --prefix="$PWD/out" \
+            --enable-cross-compile --target-os=android \
+            --arch=${{ matrix.arch }} --cpu=${{ matrix.cpu }} \
+            --cc="$TC/bin/${{ matrix.triple }}${API}-clang" \
+            --cxx="$TC/bin/${{ matrix.triple }}${API}-clang++" \
+            --ar="$TC/bin/llvm-ar" --nm="$TC/bin/llvm-nm" \
+            --ranlib="$TC/bin/llvm-ranlib" --strip="$TC/bin/llvm-strip" \
+            --sysroot="$TC/sysroot" \
+            --enable-pic --enable-static --disable-shared \
+            --disable-autodetect --enable-zlib \
+            --disable-doc --disable-debug --disable-ffplay \
+            --enable-ffmpeg --enable-ffprobe \
+            ${{ matrix.extra }}
+
+      - name: Build
+        working-directory: src
+        run: |
+          make -j"$(nproc)"
+          make install
+          NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          STRIP="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          mkdir -p ../dist
+          for b in ffmpeg ffprobe; do
+            "$STRIP" "out/bin/$b"
+            cp "out/bin/$b" "../dist/$b-${{ matrix.abi }}"
+          done
+          ls -la ../dist
+          # dovi_rpu должен быть в сборке
+          grep -q '"dovi_rpu"' libavcodec/bsf_list.c && echo "dovi_rpu: есть" || echo "dovi_rpu: НЕТ"
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="ffmpeg-${FFMPEG_VERSION}"
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --title "FFmpeg ${FFMPEG_VERSION} для Android" \
+              --notes "Сборка NDK (bionic), API ${API}, без внешних библиотек. Собрано workflow ffmpeg.yml." || true
+          gh release upload "$TAG" dist/* -R "$GITHUB_REPOSITORY" --clobber

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TorrStream Server</string>
+    <string name="channel_name">Сервер TorrStream</string>
+    <string name="notif_title">Сервер TorrStream работает</string>
+    <string name="notif_text">Адрес для телевизора: %1$s</string>
+</resources>
