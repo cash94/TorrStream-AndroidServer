@@ -209,15 +209,23 @@ class ServerService : Service() {
         }
     }
 
-    /** Код сервера из assets/server.zip — заново при каждой новой установке APK */
+    /**
+     * Код сервера: скачанное обновление (ServerUpdater), если оно новее установленного
+     * APK, иначе встроенный assets/server.zip. Распаковывается заново, только когда
+     * источник сменился.
+     */
     private fun prepareServerApp(ctx: Context) {
         val dir = Env.serverApp(ctx)
-        val stamp = ctx.packageManager.getPackageInfo(ctx.packageName, 0).lastUpdateTime.toString()
+        val apkUpdated = ctx.packageManager.getPackageInfo(ctx.packageName, 0).lastUpdateTime
+        ServerUpdater.dropIfOlderThanApk(ctx, apkUpdated)
+        val update = ServerUpdater.downloaded(ctx).takeIf { it.isFile }
+        val stamp = if (update != null) "update:${ServerUpdater.downloadedAt(ctx)}" else "apk:$apkUpdated"
         val marker = File(dir, ".installed")
         if (marker.isFile && marker.readText() == stamp) return
         dir.deleteRecursively()
         dir.mkdirs()
-        ZipInputStream(ctx.assets.open("server.zip")).use { zip ->
+        val source = if (update != null) update.inputStream() else ctx.assets.open("server.zip")
+        ZipInputStream(source).use { zip ->
             while (true) {
                 val e = zip.nextEntry ?: break
                 val out = File(dir, e.name)
@@ -231,7 +239,7 @@ class ServerService : Service() {
             }
         }
         marker.writeText(stamp)
-        log("Код сервера распакован")
+        log("Код сервера распакован (${if (update != null) "обновление" else "из APK"}): ${ServerUpdater.currentVersion(ctx) ?: "?"}")
     }
 
     /** Вывод процесса — в журнал (его обязательно вычитывать: полный буфер останавливает процесс) */
@@ -371,6 +379,13 @@ class ServerService : Service() {
 
         fun stop(ctx: Context) {
             ctx.stopService(Intent(ctx, ServerService::class.java))
+        }
+
+        /** Перезапуск — после обновления кода сервера */
+        fun restart(ctx: Context) {
+            if (!running) return
+            stop(ctx)
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ start(ctx) }, 2500)
         }
 
         /** Запустить/остановить TorrServer при уже работающем сервере */

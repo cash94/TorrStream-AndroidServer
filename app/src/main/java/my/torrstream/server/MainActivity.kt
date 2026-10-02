@@ -33,6 +33,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusView: TextView
     private lateinit var startStop: Button
     private lateinit var batteryBtn: Button
+    private lateinit var updateBtn: Button
     private lateinit var tsInstallBtn: Button
     private lateinit var tsEnabledBox: CheckBox
     private lateinit var tsRemoveBtn: Button
@@ -107,6 +108,12 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(batteryBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
+        updateBtn = Button(this).apply {
+            text = "Проверить обновление сервера"
+            setOnClickListener { updateServer() }
+        }
+        root.addView(updateBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
         // TorrServer — по желанию: можно пользоваться другим (TorrServe, на компьютере)
         root.addView(text(18f, bold = true).apply {
             text = "TorrServer на телефоне"
@@ -171,11 +178,16 @@ class MainActivity : AppCompatActivity() {
             !ServerService.running -> "Не установлен"
             else -> ServerService.torrServerState
         }
+        val version = ServerUpdater.currentVersion(this)?.let { v ->
+            v + if (ServerUpdater.downloadedAt(this) != 0L) " (обновлён)" else ""
+        } ?: "—"
         statusView.text = "Сервер TorrStream: ${ServerService.serverState}\n" +
+            "Версия сервера: $version" + (ServerUpdater.status?.let { "\n$it" } ?: "") + "\n" +
             "TorrServer: $ts\n" +
             "Работа в фоне: ${if (ignoringBattery()) "разрешена" else "ограничена экономией батареи"}"
 
         startStop.text = if (ServerService.running) "Остановить сервер" else "Запустить сервер"
+        updateBtn.isEnabled = !ServerUpdater.busy
 
         val installed = TorrServerInstaller.isInstalled(this)
         val downloading = tsProgress >= 0
@@ -186,6 +198,18 @@ class MainActivity : AppCompatActivity() {
 
         val log = ServerService.logText()
         if (logView.text.toString() != log) logView.text = log
+    }
+
+    private fun updateServer() {
+        val ctx = applicationContext
+        Thread({
+            if (ServerUpdater.checkAndDownload(ctx)) {
+                ServerService.log("Скачано обновление сервера")
+                // Работает — перезапускаем с новым кодом; нет — новый код возьмётся при запуске
+                if (ServerService.running) handler.post { ServerService.restart(ctx) }
+            }
+        }, "server-update").start()
+        handler.postDelayed({ refresh() }, 300)
     }
 
     private fun installTorrServer() {
