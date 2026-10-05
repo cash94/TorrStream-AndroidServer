@@ -1,0 +1,89 @@
+# Сборка TorrStream Server по тегу v* (git tag v0.5.1 && git push origin v0.5.1).
+#
+# Всё, что едет в APK, собирается здесь же, без локальной машины:
+#   - Node — пакеты Termux (tools/fetch-node.py);
+#   - ffmpeg/ffprobe — релиз ffmpeg-8.0 этого репозитория (workflow ffmpeg.yml);
+#   - код сервера — папка server/ этого репозитория (готовит
+#     tools/fetch-binaries.py --server-src на машине с исходниками сервера).
+#
+# Подпись — ключом из секретов репозитория (Settings → Secrets and variables → Actions):
+#   KEYSTORE_B64      — файл ключа (.jks / .keystore) в base64;
+#   KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD.
+#
+# Результат — релиз с постоянными именами файлов, поэтому ссылка
+#   https://github.com/cash94/TorrStream-AndroidServer/releases/latest/download/TorrStream-AndroidServer-armeabi-v7a.apk
+# всегда ведёт на последнюю версию (страница cash94.github.io/apk, коды Downloader).
+# Запуск вручную (Actions → build → Run workflow) — только сборка, APK в артефакте.
+name: build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Как локально: JDK 11, Gradle 7.5 (wrapper), AGP 7.4.2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Node из Termux
+        run: python3 tools/fetch-node.py --abi arm64-v8a --abi armeabi-v7a
+
+      - name: ffmpeg и код сервера
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/fetch-binaries.py --abi arm64-v8a --abi armeabi-v7a
+
+      - name: Ключ подписи
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::Нет секрета KEYSTORE_B64 — APK нечем подписать (см. шапку workflow)"
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+
+      - name: Сборка
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon --console=plain
+          mkdir -p out
+          for abi in arm64-v8a armeabi-v7a; do
+            cp "app/build/outputs/apk/release/app-$abi-release.apk" "out/TorrStream-AndroidServer-$abi.apk"
+          done
+          ls -la out
+
+      - name: Релиз
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER=$(python3 -c "import json; print(json.load(open('server/version.json')).get('version') or '')")
+          gh release create "$TAG" out/*.apk \
+            --title "TorrStream Server ${TAG#v}" \
+            --notes "Сервер в APK: ${VER}. Fire TV и большинство приставок — armeabi-v7a, 64-битные устройства — arm64-v8a."
+
+      - name: Артефакт
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: TorrStream-AndroidServer
+          path: out/*.apk
+          retention-days: 7

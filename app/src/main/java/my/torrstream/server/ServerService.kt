@@ -68,6 +68,13 @@ class ServerService : Service() {
 
     // ==================== ЗАПУСК ====================
 
+    /** Пустой openssl.cnf в памяти приложения (см. OPENSSL_CONF в startNode) */
+    private fun opensslConf(ctx: Context): File {
+        val f = File(ctx.filesDir, "openssl.cnf")
+        if (!f.isFile) f.writeText("# TorrStream Server: пустой конфиг OpenSSL\n")
+        return f
+    }
+
     private fun startAll() {
         val ctx = applicationContext
         // 1. TorrServer — по желанию (установка и флажок на экране приложения)
@@ -162,6 +169,11 @@ class ServerService : Service() {
             // Корневые сертификаты — системные Android: у OpenSSL из Termux свой путь,
             // которого на телефоне нет. DNS — системный (bionic), TORRSTREAM_DNS не нужен
             put("SSL_CERT_DIR", "/system/etc/security/cacerts")
+            // Конфиг OpenSSL — свой, пустой. Иначе OpenSSL из Termux читает зашитый
+            // /data/data/com.termux/files/usr/etc/tls/openssl.cnf: без Termux файла нет
+            // и это не ошибка, а с установленным Termux папка есть, но чужая —
+            // «Permission denied», и Node падает при старте с кодом 13
+            put("OPENSSL_CONF", opensslConf(ctx).absolutePath)
             put("HOME", home.absolutePath)
             put("TMPDIR", ctx.cacheDir.absolutePath)
             // io_uring приложениям Android запрещён фильтром системных вызовов (seccomp):

@@ -1,11 +1,15 @@
 """
 Готовит всё, что едет в APK, кроме Node (его кладёт tools/fetch-node.py):
 
-  python tools/fetch-binaries.py --server-src C:/videoloop-server
+  python tools/fetch-binaries.py [--server-src C:/videoloop-server]
 
 - код сервера TorrStream: server.js, lib/, routes/… и рабочие зависимости
-  (npm ci --omit=dev) — архивом app/src/main/assets/server.zip; приложение
-  распаковывает его при первом запуске новой версии и запускает node server.js;
+  (npm ci --omit=dev) — архивом server/TorrStream-android-server.zip в этом
+  репозитории, рядом server/version.json (версия, sha256). Его же берёт кнопка
+  «Обновить сервер» (ServerUpdater) и CI. С --server-src архив собирается заново
+  из исходников (закрытый cash94/TorrStream), без него — берётся уже лежащий.
+  В APK он едет как app/src/main/assets/server.zip; приложение распаковывает его
+  при первом запуске новой версии и запускает node server.js;
 - ffmpeg и ffprobe: сборка NDK под bionic из релиза ffmpeg-<версия> этого репозитория
   (workflow .github/workflows/ffmpeg.yml) → app/src/main/jniLibs/<abi>/lib{ffmpeg,ffprobe}.so.
 
@@ -13,7 +17,10 @@
 приложения не работают: фильтр системных вызовов (seccomp) убивает их SIGSYS (код 159).
 """
 import argparse
+import datetime
+import hashlib
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -25,6 +32,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JNI = os.path.join(ROOT, 'app', 'src', 'main', 'jniLibs')
 ASSETS = os.path.join(ROOT, 'app', 'src', 'main', 'assets')
 WORK = os.path.join(ROOT, 'build', 'binaries')
+SERVER_DIR = os.path.join(ROOT, 'server')
+SERVER_ZIP = os.path.join(SERVER_DIR, 'TorrStream-android-server.zip')
 
 REPO = 'cash94/TorrStream-AndroidServer'
 ABIS = ['arm64-v8a', 'armeabi-v7a', 'x86_64']
@@ -70,18 +79,37 @@ def bundle_server(src):
     print(f'== npm {cmd} --omit=dev')
     subprocess.run(['npm', cmd, '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'],
                    cwd=stage, check=True, shell=(os.name == 'nt'))
-    os.makedirs(ASSETS, exist_ok=True)
-    out = os.path.join(ASSETS, 'server.zip')
-    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
-        for base, _, files in os.walk(stage):
-            for f in files:
+    os.makedirs(SERVER_DIR, exist_ok=True)
+    with zipfile.ZipFile(SERVER_ZIP, 'w', zipfile.ZIP_DEFLATED) as z:
+        for base, _, files in sorted(os.walk(stage)):
+            for f in sorted(files):
                 full = os.path.join(base, f)
                 z.write(full, os.path.relpath(full, stage).replace(os.sep, '/'))
-    print(f'== server.zip: {os.path.getsize(out) // 1024} КБ')
+    data = open(SERVER_ZIP, 'rb').read()
+    # Версия — из первой строки server.js, как её показывает приложение
+    first = open(os.path.join(stage, 'server.js'), encoding='utf-8').readline()
+    m = re.search(r"'([^']+)'", first)
+    info = {
+        'version': m.group(1) if m else None,
+        'sha256': hashlib.sha256(data).hexdigest(),
+        'size': len(data),
+        'built': datetime.date.today().isoformat(),
+    }
+    with open(os.path.join(SERVER_DIR, 'version.json'), 'w', encoding='utf-8') as f:
+        json.dump(info, f, ensure_ascii=False, indent=2)
+        f.write('\n')
+    print(f'== server/TorrStream-android-server.zip: {len(data) // 1024} КБ, {info["version"]}')
+
+
+def copy_server_to_assets():
+    if not os.path.isfile(SERVER_ZIP):
+        sys.exit('нет server/TorrStream-android-server.zip — запустите с --server-src')
+    os.makedirs(ASSETS, exist_ok=True)
+    shutil.copyfile(SERVER_ZIP, os.path.join(ASSETS, 'server.zip'))
 
 
 def fetch_ffmpeg(tag, abi, token):
-    """ffmpeg-<abi> и ffprobe-<abi> из релиза <tag> этого репозитория (закрытого — с токеном)"""
+    """ffmpeg-<abi> и ffprobe-<abi> из релиза <tag> этого репозитория (токен — на случай закрытого)"""
     rel = json.loads(github_get(f'https://api.github.com/repos/{REPO}/releases/tags/{tag}', token))
     assets = {a['name']: a['url'] for a in rel.get('assets', [])}
     for name in ('ffmpeg', 'ffprobe'):
@@ -95,12 +123,14 @@ def fetch_ffmpeg(tag, abi, token):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--server-src', required=True, help='папка с исходниками сервера TorrStream')
+    ap.add_argument('--server-src', help='собрать server/ заново из исходников сервера TorrStream')
     ap.add_argument('--abi', choices=ABIS, action='append', help='только эти ABI (по умолчанию все)')
     ap.add_argument('--ffmpeg-tag', default='ffmpeg-8.0', help='релиз с ffmpeg (workflow ffmpeg.yml)')
     args = ap.parse_args()
     os.makedirs(WORK, exist_ok=True)
-    bundle_server(args.server_src)
+    if args.server_src:
+        bundle_server(args.server_src)
+    copy_server_to_assets()
     token = github_token()
     for abi in args.abi or ABIS:
         os.makedirs(os.path.join(JNI, abi), exist_ok=True)

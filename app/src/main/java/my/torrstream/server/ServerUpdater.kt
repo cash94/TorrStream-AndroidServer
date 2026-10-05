@@ -4,20 +4,24 @@ import android.content.Context
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 
 /**
  * Обновление кода сервера TorrStream без переустановки APK.
  *
  * Код сервера (JS + node_modules, ~3 МБ) лежит в APK (assets/server.zip), а свежая
- * версия — ассетом TorrStream-android-server.zip в публичном релизе #vidaa репозитория
- * cash94/cash94.github.io, рядом со сборками для Windows/Linux/macOS. Скачанный архив
- * берётся вместо встроенного, пока не установлен APK новее него (ServerService.prepareServerApp).
+ * версия — в папке server/ этого репозитория (cash94/TorrStream-AndroidServer):
+ * TorrStream-android-server.zip и version.json с его sha256. Готовит их
+ * tools/fetch-binaries.py --server-src. Новый архив — тот, чей sha256 не совпадает
+ * с установленным; скачанный проверяется по тому же sha256. Он берётся вместо
+ * встроенного, пока не установлен APK новее него (ServerService.prepareServerApp).
  */
 object ServerUpdater {
-    private const val RELEASE = "https://api.github.com/repos/cash94/cash94.github.io/releases/tags/%23vidaa"
-    private const val ASSET = "TorrStream-android-server.zip"
+    private const val BASE = "https://raw.githubusercontent.com/cash94/TorrStream-AndroidServer/main/server/"
+    private const val ARCHIVE = "TorrStream-android-server.zip"
     private const val PREFS = "server_update"
 
     @Volatile var status: String? = null
@@ -41,48 +45,55 @@ object ServerUpdater {
         null
     }
 
+    private fun sha256(input: InputStream): String = input.use { s ->
+        val md = MessageDigest.getInstance("SHA-256")
+        val buf = ByteArray(64 * 1024)
+        while (true) {
+            val n = s.read(buf)
+            if (n < 0) break
+            md.update(buf, 0, n)
+        }
+        md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /** sha256 архива, из которого распакован сервер: скачанного или встроенного */
+    private fun installedSha(ctx: Context): String {
+        val update = downloaded(ctx)
+        if (update.isFile) prefs(ctx).getString("sha256", null)?.let { return it }
+        return sha256(ctx.assets.open("server.zip"))
+    }
+
     /**
-     * Проверяет релиз и, если ассет новее установленного, скачивает его.
-     * Возвращает true, если скачана новая версия (сервер надо перезапустить).
-     * Блокирующий — звать не с главного потока.
+     * Сверяет version.json из репозитория с установленным архивом и, если тот другой,
+     * скачивает новый. Возвращает true, если скачана новая версия (сервер надо
+     * перезапустить). Блокирующий — звать не с главного потока.
      */
     fun checkAndDownload(ctx: Context): Boolean {
         busy = true
         status = "Проверяю обновление…"
         try {
-            val rel = get(RELEASE).let { JSONObject(String(it)) }
-            val assets = rel.optJSONArray("assets") ?: throw IOException("в релизе нет файлов")
-            var url: String? = null
-            var updated: String? = null
-            for (i in 0 until assets.length()) {
-                val a = assets.getJSONObject(i)
-                if (a.optString("name") == ASSET) {
-                    url = a.optString("browser_download_url")
-                    updated = a.optString("updated_at")
-                }
-            }
-            if (url == null || updated == null) {
-                status = "Обновлений нет: в релизе нет $ASSET"
-                return false
-            }
-            if (updated == prefs(ctx).getString("asset_updated", null) && downloaded(ctx).isFile) {
+            val info = JSONObject(String(get(BASE + "version.json")))
+            val sha = info.optString("sha256").lowercase()
+            val version = info.optString("version").takeIf { it.isNotEmpty() }
+            if (sha.length != 64) throw IOException("нет sha256 в version.json")
+            if (sha == installedSha(ctx)) {
                 status = "Установлена последняя версия"
                 return false
             }
-            status = "Скачиваю обновление сервера…"
-            val data = get(url)
-            // Архив должен содержать server.js — иначе это не тот файл
-            if (!String(data, 0, minOf(data.size, 4), Charsets.ISO_8859_1).startsWith("PK")) {
-                throw IOException("скачан не zip")
-            }
+            status = "Скачиваю ${version ?: "обновление"}…"
+            val data = get(BASE + ARCHIVE)
+            // Архив обязан совпасть с version.json: иначе он недокачан или подменён
+            // (raw.githubusercontent кэширует файлы по отдельности, и на минуты
+            // после выкладки version.json бывает новее архива)
+            if (sha256(data.inputStream()) != sha) throw IOException("архив не совпал с version.json, попробуйте через пару минут")
             val tmp = File(ctx.filesDir, "server-update.zip.tmp")
             tmp.writeBytes(data)
             if (!tmp.renameTo(downloaded(ctx))) throw IOException("не удалось сохранить")
             prefs(ctx).edit()
-                .putString("asset_updated", updated)
+                .putString("sha256", sha)
                 .putLong("downloaded_at", System.currentTimeMillis())
                 .apply()
-            status = "Скачано обновление от ${updated.take(10)}"
+            status = "Скачано: ${version ?: sha.take(8)}"
             return true
         } catch (e: Exception) {
             status = "Ошибка обновления: ${e.message}"
@@ -97,7 +108,7 @@ object ServerUpdater {
         val at = downloadedAt(ctx)
         if (at != 0L && at < apkUpdatedAt) {
             downloaded(ctx).delete()
-            prefs(ctx).edit().remove("asset_updated").remove("downloaded_at").apply()
+            prefs(ctx).edit().remove("sha256").remove("downloaded_at").apply()
         }
     }
 

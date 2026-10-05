@@ -16,14 +16,36 @@ android {
         // targetSdk 29+ Android 10 запрещает (W^X).
         //noinspection ExpiredTargetSdkVersion
         targetSdkVersion 28
-        versionCode 5
-        versionName "0.5.0"
+        versionCode 6
+        versionName "0.5.1"
+    }
+
+    // Подпись release-сборки — ключом из секретов CI (.github/workflows/build.yml):
+    // файл ключа и пароли приходят переменными окружения. Без них release-APK
+    // собирается неподписанным, а для проверки на устройстве есть debug
+    def ksFile = System.getenv('KEYSTORE_FILE')
+    signingConfigs {
+        release {
+            if (ksFile) {
+                storeFile file(ksFile)
+                storePassword System.getenv('KEYSTORE_PASSWORD')
+                keyAlias System.getenv('KEY_ALIAS')
+                keyPassword System.getenv('KEY_PASSWORD')
+            }
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled false
+            if (ksFile) signingConfig signingConfigs.release
         }
+    }
+
+    // targetSdk 28 lint считает ошибкой и рубит release — а он нужен намеренно
+    // (запуск скачанного TorrServer, см. defaultConfig)
+    lint {
+        checkReleaseBuilds false
     }
 
     // Отдельный APK на архитектуру: в каждом свои сервер (Node) и ffmpeg, по ~200 МБ
