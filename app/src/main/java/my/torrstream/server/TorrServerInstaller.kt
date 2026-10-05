@@ -71,15 +71,49 @@ object TorrServerInstaller {
         null
     }
 
+    /** Итог последней проверки обновления — показывается в карточке TorrServer */
+    @Volatile var updateStatus: String? = null
+    @Volatile var checking = false
+        private set
+
+    private fun latestRelease(): JSONObject = open(RELEASES, 20000, 60000).let { c ->
+        try { JSONObject(c.inputStream.bufferedReader().readText()) } finally { c.disconnect() }
+    }
+
+    /**
+     * Проверяет последний релиз и, если он новее установленного, ставит его поверх.
+     * true — обновлён: работающий TorrServer надо перезапустить (старый процесс
+     * так и работает со старым файлом). Блокирующий — звать не с главного потока.
+     */
+    fun update(ctx: Context): Boolean {
+        checking = true
+        updateStatus = "Проверяю обновление…"
+        try {
+            val rel = latestRelease()
+            val tag = rel.optString("tag_name")
+            if (tag.isNotEmpty() && tag == version(ctx)) {
+                updateStatus = "Установлена последняя версия"
+                return false
+            }
+            updateStatus = "Скачиваю $tag…"
+            install(ctx, rel)
+            updateStatus = "Обновлён до $tag"
+            return true
+        } catch (e: Exception) {
+            updateStatus = "Ошибка обновления: ${e.message ?: e.javaClass.simpleName}"
+            return false
+        } finally {
+            checking = false
+        }
+    }
+
     /** Скачивает последнюю версию. Блокирующий — звать не с главного потока */
-    fun install(ctx: Context) {
+    fun install(ctx: Context, release: JSONObject? = null) {
         val suffix = Env.torrServerAsset ?: throw IOException("Процессор телефона не поддерживается")
         lastError = null
         progress = 0
         try {
-            val json = open(RELEASES, 20000, 60000).let { c ->
-                try { JSONObject(c.inputStream.bufferedReader().readText()) } finally { c.disconnect() }
-            }
+            val json = release ?: latestRelease()
             val tag = json.optString("tag_name")
             val assets = json.optJSONArray("assets") ?: throw IOException("В релизе нет файлов")
             var url: String? = null

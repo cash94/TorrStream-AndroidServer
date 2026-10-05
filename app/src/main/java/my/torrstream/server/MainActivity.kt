@@ -3,8 +3,7 @@ package my.torrstream.server
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
-import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -12,33 +11,42 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
-import android.util.TypedValue
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
-import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 
 /**
- * Один экран: адрес для телевизора, состояние сервера и TorrServer, запуск/остановка,
- * исключение из экономии батареи и журнал. Разметка собирается кодом — экран простой.
+ * Главный экран: адрес для телевизора, запуск/остановка, TorrServer и обслуживание.
+ * Состояние сервера с версией — значком в шапке, TorrServer — в своей карточке.
+ * Журнал — отдельным экраном (LogActivity).
+ *
+ * Разметка собирается кодом (Ui.kt). На широком экране — телевизоре или планшете —
+ * две колонки, на телефоне одна. Всё, что нажимается, принимает фокус пульта.
  */
 class MainActivity : AppCompatActivity() {
 
     private val handler = Handler(Looper.getMainLooper())
+    private lateinit var statePill: TextView
+    private lateinit var stateDot: View
     private lateinit var addressView: TextView
-    private lateinit var statusView: TextView
     private lateinit var startStop: Button
+    private lateinit var serverError: TextView
+    private lateinit var tsRow: Ui.StatusRow
+    private lateinit var updateStatus: TextView
     private lateinit var batteryBtn: Button
     private lateinit var updateBtn: Button
     private lateinit var tsInstallBtn: Button
-    private lateinit var tsEnabledBox: CheckBox
+    private lateinit var tsEnabled: Ui.ToggleRow
     private lateinit var tsRemoveBtn: Button
-    private lateinit var logView: TextView
-    private lateinit var logScroll: ScrollView
+    private lateinit var tsUpdateBtn: Button
+    private lateinit var tsUpdateStatus: TextView
+    private lateinit var tsActions: LinearLayout
+    private var lastRunning: Boolean? = null
 
     private val tick = object : Runnable {
         override fun run() {
@@ -51,6 +59,9 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         ServerService.init(this)
         setContentView(buildLayout())
+        // На телевизоре фокус сразу на главной кнопке — иначе первое нажатие
+        // пульта уходит на поиск, куда его поставить
+        if (Ui.isTv(this)) startStop.requestFocus()
     }
 
     override fun onResume() {
@@ -63,144 +74,231 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
     }
 
-    private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
+    private fun dp(v: Int) = Ui.dp(this, v)
 
-    private fun text(size: Float, color: Int = Color.WHITE, bold: Boolean = false) = TextView(this).apply {
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, size)
-        setTextColor(color)
-        if (bold) setTypeface(typeface, Typeface.BOLD)
-        setTextIsSelectable(true)
-    }
-
-    private fun buildLayout(): ScrollView {
+    private fun buildLayout(): View {
+        val tv = Ui.isTv(this)
+        val wide = Ui.wide(this)
+        Ui.compact = wide
+        // Телевизоры обрезают края кадра (overscan) — поля шире
+        val side = dp(if (tv) 40 else 18)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(24), dp(20), dp(24))
+            setPadding(side, dp(if (wide) 18 else 22), side, dp(if (wide) 14 else 24))
         }
-        root.addView(text(26f, bold = true).apply { text = getString(R.string.app_name) })
 
-        root.addView(text(14f, Color.parseColor("#9A9AA6")).apply {
-            text = "Адрес для телевизора (Vidaa и др.) — в одной Wi-Fi сети с телефоном:"
-            setPadding(0, dp(18), 0, dp(4))
+        // ── Шапка: название и состояние ──
+        // На телефоне значок состояния — под названием: с версией сервера в одну
+        // строку с ним не помещается
+        val header = LinearLayout(this).apply {
+            orientation = if (wide) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+            gravity = if (wide) Gravity.CENTER_VERTICAL else Gravity.START
+        }
+        val titles = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        titles.addView(Ui.text(this, if (wide) 22f else 26f, bold = true).apply { text = getString(R.string.app_name) })
+        titles.addView(Ui.text(this, if (wide) 13f else 14f, Ui.MUTED).apply {
+            text = "Сервер TorrStream для телевизоров в вашей сети"
+            setPadding(0, dp(2), 0, 0)
         })
-        addressView = text(24f, Color.parseColor("#FF8C00"), bold = true)
-        root.addView(addressView)
-        root.addView(text(13f, Color.parseColor("#9A9AA6")).apply {
-            text = "Введите его в TorrStream на телевизоре. Если на телефоне работает TorrServer, его адрес (порт 8090) телевизор подставит сам."
-            setPadding(0, dp(4), 0, dp(16))
+        header.addView(titles, if (wide) LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        else LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val pill = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = Ui.rounded(Ui.CARD, dp(20), Ui.CARD_LINE, dp(1))
+            setPadding(dp(14), dp(8), dp(16), dp(8))
+        }
+        stateDot = View(this)
+        pill.addView(stateDot, LinearLayout.LayoutParams(dp(10), dp(10)).apply { rightMargin = dp(8) })
+        statePill = Ui.text(this, 14f, bold = true)
+        pill.addView(statePill)
+        header.addView(pill, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            .apply { if (!wide) topMargin = dp(12) })
+        root.addView(header)
+
+        // ── Колонки ──
+        val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val gap = dp(if (wide) 12 else 16)
+        if (wide) {
+            val cols = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            cols.addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = gap / 2 })
+            cols.addView(right, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = gap / 2 })
+            root.addView(cols, Ui.matchWidth(dp(14)))
+        } else {
+            root.addView(left, Ui.matchWidth(dp(20)))
+            root.addView(right, Ui.matchWidth(gap))
+        }
+
+        // Адрес
+        val addrCard = Ui.card(this, "Адрес для телевизора")
+        addressView = Ui.text(this, if (wide) 24f else 26f, Ui.ACCENT, bold = true).apply {
+            // Выделять/копировать адрес — только на телефоне: на телевизоре
+            // выделяемый текст забирал бы фокус пульта
+            if (!tv) setTextIsSelectable(true)
+        }
+        addrCard.addView(addressView)
+        addrCard.addView(Ui.text(this, if (wide) 12f else 13f, Ui.MUTED).apply {
+            text = "Введите его в TorrStream на телевизоре (Vidaa и др.) в той же Wi-Fi сети. " +
+                "TorrServer отсюда (порт 8090) телевизор подставит сам."
+            setPadding(0, dp(6), 0, dp(if (wide) 12 else 16))
+            setLineSpacing(0f, 1.15f)
         })
-
-        statusView = text(15f).apply { setPadding(0, 0, 0, dp(16)) }
-        root.addView(statusView)
-
-        startStop = Button(this).apply {
-            setOnClickListener {
-                if (ServerService.running) ServerService.stop(this@MainActivity)
-                else ServerService.start(this@MainActivity)
-                handler.postDelayed({ refresh() }, 300)
-            }
+        startStop = Ui.button(this, "Запустить сервер", Ui.Kind.PRIMARY, big = true) {
+            if (ServerService.running) ServerService.stop(this) else ServerService.start(this)
+            handler.postDelayed({ refresh() }, 300)
         }
-        root.addView(startStop, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-
-        batteryBtn = Button(this).apply {
-            text = "Разрешить работу в фоне (без экономии батареи)"
-            setOnClickListener { requestIgnoreBattery() }
+        addrCard.addView(startStop, Ui.matchWidth())
+        // Не запустился / падает — причина здесь, подробности в журнале
+        serverError = Ui.text(this, 13f, Ui.ERR).apply {
+            setPadding(dp(4), dp(8), 0, 0)
+            visibility = View.GONE
         }
-        root.addView(batteryBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-
-        updateBtn = Button(this).apply {
-            text = "Проверить обновление сервера"
-            setOnClickListener { updateServer() }
-        }
-        root.addView(updateBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        addrCard.addView(serverError)
+        left.addView(addrCard, Ui.matchWidth())
 
         // TorrServer — по желанию: можно пользоваться другим (TorrServe, на компьютере)
-        root.addView(text(18f, bold = true).apply {
-            text = "TorrServer на телефоне"
-            setPadding(0, dp(22), 0, dp(4))
+        val tsCard = Ui.card(this, "TorrServer на этом устройстве")
+        tsCard.addView(Ui.text(this, if (wide) 12f else 13f, Ui.MUTED).apply {
+            text = "Необязательно: телевизор может работать с TorrServer на другом устройстве — он указывается в настройках TorrStream."
+            setPadding(0, 0, 0, dp(if (wide) 6 else 8))
+            setLineSpacing(0f, 1.15f)
         })
-        root.addView(text(13f, Color.parseColor("#9A9AA6")).apply {
-            text = "Необязательно: телевизор может работать с TorrServer на другом устройстве — он указывается в его настройках."
-            setPadding(0, 0, 0, dp(8))
-        })
-        tsInstallBtn = Button(this).apply {
-            text = "Установить TorrServer (~64 МБ)"
-            setOnClickListener { installTorrServer() }
+        tsRow = Ui.StatusRow(this, null)
+        tsCard.addView(tsRow, Ui.matchWidth(0).apply { bottomMargin = dp(8) })
+        tsInstallBtn = Ui.button(this, "Установить TorrServer (~64 МБ)", Ui.Kind.SECONDARY) { installTorrServer() }
+        tsCard.addView(tsInstallBtn, Ui.matchWidth())
+        tsEnabled = Ui.ToggleRow(this, "Запускать вместе с сервером") { on ->
+            TorrServerInstaller.setEnabled(this, on)
+            ServerService.torrServer(this, on)
+        }.apply { checked = TorrServerInstaller.enabled(this@MainActivity) }
+        tsCard.addView(tsEnabled, Ui.matchWidth())
+        // Обновление и удаление — в один ряд, как в «Обслуживании»
+        tsActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        tsUpdateBtn = Ui.button(this, "Обновить") { updateTorrServer() }
+        tsActions.addView(tsUpdateBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        tsRemoveBtn = Ui.button(this, "Удалить", Ui.Kind.DANGER) { removeTorrServer() }
+        tsActions.addView(tsRemoveBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(10) })
+        tsCard.addView(tsActions, Ui.matchWidth(dp(10)))
+        tsUpdateStatus = Ui.text(this, 13f, Ui.MUTED).apply {
+            setPadding(dp(4), dp(6), 0, 0)
+            visibility = View.GONE
         }
-        root.addView(tsInstallBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        tsEnabledBox = CheckBox(this).apply {
-            text = "Запускать вместе с сервером"
-            setTextColor(Color.WHITE)
-            isChecked = TorrServerInstaller.enabled(this@MainActivity)
-            setOnCheckedChangeListener { _, on ->
-                TorrServerInstaller.setEnabled(this@MainActivity, on)
-                ServerService.torrServer(this@MainActivity, on)
-            }
-        }
-        root.addView(tsEnabledBox)
-        tsRemoveBtn = Button(this).apply {
-            text = "Удалить TorrServer"
-            setOnClickListener { removeTorrServer() }
-        }
-        root.addView(tsRemoveBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        tsCard.addView(tsUpdateStatus)
+        right.addView(tsCard, Ui.matchWidth())
 
-        root.addView(text(14f, Color.parseColor("#9A9AA6")).apply {
-            text = "Журнал"
-            setPadding(0, dp(20), 0, dp(6))
-        })
-        logView = text(11f, Color.parseColor("#C8C8D0")).apply {
-            typeface = Typeface.MONOSPACE
-            setBackgroundColor(Color.parseColor("#141419"))
-            setPadding(dp(10), dp(10), dp(10), dp(10))
-            gravity = Gravity.START
-        }
-        root.addView(logView)
+        // Обслуживание
+        val toolsCard = Ui.card(this, "Обслуживание")
+        // Обновление и журнал — в один ряд: так карточка ниже, и на телевизоре
+        // всё помещается на экран
+        val toolsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        updateBtn = Ui.button(this, "Обновить сервер") { updateServer() }
+        toolsRow.addView(updateBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        toolsRow.addView(Ui.button(this, "Журнал") {
+            startActivity(Intent(this, LogActivity::class.java))
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(10) })
+        toolsCard.addView(toolsRow, Ui.matchWidth())
+        updateStatus = Ui.text(this, 13f, Ui.MUTED).apply { setPadding(dp(4), dp(6), 0, 0) }
+        toolsCard.addView(updateStatus)
+        batteryBtn = Ui.button(this, "Разрешить работу в фоне") { requestIgnoreBattery() }
+        toolsCard.addView(batteryBtn, Ui.matchWidth(dp(10)))
+        left.addView(toolsCard, Ui.matchWidth(gap))
 
-        logScroll = ScrollView(this).apply {
-            setBackgroundColor(Color.parseColor("#0B0B0F"))
+        return ScrollView(this).apply {
+            setBackgroundColor(Ui.BG)
+            isFillViewport = true
+            // Прокрутка идёт за фокусом пульта сама; полоса только мешает
+            isVerticalScrollBarEnabled = !tv
             addView(root)
         }
-        return logScroll
+    }
+
+    /** Цвет точки по тексту состояния из ServerService */
+    private fun colorOf(state: String) = when {
+        state.startsWith("Работает") -> Ui.OK
+        state.startsWith("Остановлен") || state.startsWith("Не установлен") || state.startsWith("Установлен") -> Ui.IDLE
+        state.startsWith("Не ") || state.startsWith("Падает") || state.startsWith("Ошибка") || state.startsWith("Нет ") -> Ui.ERR
+        else -> Ui.WARN
     }
 
     @SuppressLint("SetTextI18n")
     private fun refresh() {
+        val running = ServerService.running
         val ips = Env.lanAddresses()
-        addressView.text = if (ips.isEmpty()) "Нет сети — подключите Wi-Fi"
+        val addr = if (ips.isEmpty()) "Нет сети — подключите Wi-Fi"
         else ips.joinToString("\n") { "http://$it:${Env.SERVER_PORT}" }
+        if (addressView.text.toString() != addr) addressView.text = addr
+
+        val server = ServerService.serverState
+        val failed = colorOf(server) == Ui.ERR
+        val pillText = when {
+            running && server.startsWith("Работает") ->
+                "Работает" + (ServerUpdater.currentVersion(this)?.let { " · $it" } ?: "")
+            running && failed -> "Ошибка"
+            running -> "Запуск…"
+            else -> "Остановлен"
+        }
+        if (statePill.text.toString() != pillText) statePill.text = pillText
+        stateDot.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(when {
+                failed -> Ui.ERR
+                running && server.startsWith("Работает") -> Ui.OK
+                running -> Ui.WARN
+                else -> Ui.IDLE
+            })
+        }
+        val err = if (failed) server else ""
+        if (serverError.text.toString() != err) serverError.text = err
+        show(serverError, failed)
+
+        if (lastRunning != running) {
+            lastRunning = running
+            startStop.text = if (running) "Остановить сервер" else "Запустить сервер"
+            Ui.style(startStop, if (running) Ui.Kind.DANGER else Ui.Kind.PRIMARY)
+        }
 
         val tsProgress = TorrServerInstaller.progress
         val ts = when {
             tsProgress >= 0 -> "Скачиваю… $tsProgress%"
             TorrServerInstaller.lastError != null -> "Ошибка загрузки: ${TorrServerInstaller.lastError}"
-            !ServerService.running && TorrServerInstaller.isInstalled(this) ->
-                "Установлен ${TorrServerInstaller.version(this) ?: ""}"
-            !ServerService.running -> "Не установлен"
+            !running && TorrServerInstaller.isInstalled(this) -> "Установлен ${TorrServerInstaller.version(this) ?: ""}".trim()
+            !running -> "Не установлен"
             else -> ServerService.torrServerState
         }
-        val version = ServerUpdater.currentVersion(this)?.let { v ->
-            v + if (ServerUpdater.downloadedAt(this) != 0L) " (обновлён)" else ""
-        } ?: "—"
-        statusView.text = "Сервер TorrStream: ${ServerService.serverState}\n" +
-            "Версия сервера: $version" + (ServerUpdater.status?.let { "\n$it" } ?: "") + "\n" +
-            "TorrServer: $ts\n" +
-            "Работа в фоне: ${if (ignoringBattery()) "разрешена" else "ограничена экономией батареи"}"
+        tsRow.set(ts, if (tsProgress >= 0) Ui.WARN else colorOf(ts))
 
-        startStop.text = if (ServerService.running) "Остановить сервер" else "Запустить сервер"
-        updateBtn.isEnabled = !ServerUpdater.busy
+        val battery = ignoringBattery()
+
+        val upd = ServerUpdater.status ?: ""
+        if (updateStatus.text.toString() != upd) updateStatus.text = upd
+        updateStatus.visibility = if (upd.isEmpty()) View.GONE else View.VISIBLE
 
         val installed = TorrServerInstaller.isInstalled(this)
         val downloading = tsProgress >= 0
-        tsInstallBtn.visibility = if (!installed && !downloading) android.view.View.VISIBLE else android.view.View.GONE
-        tsEnabledBox.visibility = if (installed) android.view.View.VISIBLE else android.view.View.GONE
-        tsRemoveBtn.visibility = if (installed && !downloading) android.view.View.VISIBLE else android.view.View.GONE
-        batteryBtn.visibility = if (ignoringBattery()) android.view.View.GONE else android.view.View.VISIBLE
-
-        val log = ServerService.logText()
-        if (logView.text.toString() != log) logView.text = log
+        val focused = currentFocus
+        show(tsInstallBtn, !installed && !downloading)
+        show(tsEnabled, installed)
+        show(tsActions, installed && !downloading)
+        val tsUpd = TorrServerInstaller.updateStatus ?: ""
+        if (tsUpdateStatus.text.toString() != tsUpd) tsUpdateStatus.text = tsUpd
+        show(tsUpdateStatus, installed && tsUpd.isNotEmpty())
+        show(batteryBtn, !battery)
+        // Кнопка под фокусом пульта пропала (TorrServer установился, работу в
+        // фоне разрешили) — без этого фокус повис бы в пустоте
+        if (focused != null && !focused.isShown) startStop.requestFocus()
     }
 
+    private fun show(v: View, on: Boolean) {
+        val want = if (on) View.VISIBLE else View.GONE
+        if (v.visibility != want) v.visibility = want
+    }
+
+    // Кнопки обновления на время проверки не выключаем, а повторное нажатие
+    // пропускаем: выключенная кнопка теряет фокус пульта
+
     private fun updateServer() {
+        if (ServerUpdater.busy) return
         val ctx = applicationContext
         Thread({
             if (ServerUpdater.checkAndDownload(ctx)) {
@@ -224,6 +322,24 @@ class MainActivity : AppCompatActivity() {
                 ServerService.log("Ошибка загрузки TorrServer: ${e.message}")
             }
         }, "ts-install").start()
+        handler.postDelayed({ refresh() }, 300)
+    }
+
+    private fun updateTorrServer() {
+        if (TorrServerInstaller.checking || TorrServerInstaller.progress >= 0) return
+        val ctx = applicationContext
+        Thread({
+            if (TorrServerInstaller.update(ctx)) {
+                ServerService.log("TorrServer обновлён до ${TorrServerInstaller.version(ctx)}")
+                // Работающий перезапускаем уже с новым файлом. Пауза — чтобы старый
+                // процесс успел освободить порт 8090: занятый порт сервис принял бы
+                // за чужой TorrServer и свой не запустил
+                if (ServerService.running && TorrServerInstaller.enabled(ctx)) {
+                    handler.post { ServerService.torrServer(ctx, false) }
+                    handler.postDelayed({ ServerService.torrServer(ctx, true) }, 2500)
+                }
+            }
+        }, "ts-update").start()
         handler.postDelayed({ refresh() }, 300)
     }
 

@@ -370,6 +370,16 @@ class ServerService : Service() {
 
         fun logText(): String = synchronized(lines) { lines.joinToString("\n") }
 
+        /** Очистка экрана журнала; файл server.log не трогаем — он для разбора проблем */
+        fun clearLog() = synchronized(lines) { lines.clear() }
+
+        /** Весь server.log (до 2 МБ) — чтобы отправить разработчику */
+        fun logFileText(): String = try {
+            logFile?.takeIf { it.isFile }?.readText() ?: logText()
+        } catch (_: Exception) {
+            logText()
+        }
+
         fun start(ctx: Context) {
             init(ctx)
             val intent = Intent(ctx, ServerService::class.java)
