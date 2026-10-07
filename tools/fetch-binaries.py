@@ -3,8 +3,9 @@
 
   python tools/fetch-binaries.py [--server-src C:/videoloop-server]
 
-- код сервера TorrStream: server.js, lib/, routes/… и рабочие зависимости
-  (npm ci --omit=dev) — архивом server/TorrStream-android-server.zip в этом
+- код сервера TorrStream: server.js, lib/, routes/… (минифицированные esbuild —
+  исходники сервера закрытые, а архив лежит в открытом репозитории) и рабочие
+  зависимости (npm ci --omit=dev) — архивом server/TorrStream-android-server.zip в этом
   репозитории, рядом server/version.json (версия, sha256). Его же берёт кнопка
   «Обновить сервер» (ServerUpdater) и CI. С --server-src архив собирается заново
   из исходников (закрытый cash94/TorrStream), без него — берётся уже лежащий.
@@ -36,6 +37,7 @@ SERVER_DIR = os.path.join(ROOT, 'server')
 SERVER_ZIP = os.path.join(SERVER_DIR, 'TorrStream-android-server.zip')
 
 REPO = 'cash94/TorrStream-AndroidServer'
+ESBUILD_VERSION = '0.28.2'
 ABIS = ['arm64-v8a', 'armeabi-v7a', 'x86_64']
 # Что из исходников сервера нужно для запуска (как scripts в package.json → pkg)
 SERVER_FILES = ['server.js', 'module-loader.js', 'windows-pause.js', 'package.json', 'package-lock.json']
@@ -74,6 +76,7 @@ def bundle_server(src):
             shutil.copy2(path, stage)
     for d in SERVER_DIRS:
         shutil.copytree(os.path.join(src, d), os.path.join(stage, d))
+    version = minify_server(stage)
     # С lock-файлом — ровно те версии, что в нём; без него — по package.json
     cmd = 'ci' if os.path.exists(os.path.join(stage, 'package-lock.json')) else 'install'
     print(f'== npm {cmd} --omit=dev')
@@ -86,11 +89,8 @@ def bundle_server(src):
                 full = os.path.join(base, f)
                 z.write(full, os.path.relpath(full, stage).replace(os.sep, '/'))
     data = open(SERVER_ZIP, 'rb').read()
-    # Версия — из первой строки server.js, как её показывает приложение
-    first = open(os.path.join(stage, 'server.js'), encoding='utf-8').readline()
-    m = re.search(r"'([^']+)'", first)
     info = {
-        'version': m.group(1) if m else None,
+        'version': version,
         'sha256': hashlib.sha256(data).hexdigest(),
         'size': len(data),
         'built': datetime.date.today().isoformat(),
@@ -99,6 +99,33 @@ def bundle_server(src):
         json.dump(info, f, ensure_ascii=False, indent=2)
         f.write('\n')
     print(f'== server/TorrStream-android-server.zip: {len(data) // 1024} КБ, {info["version"]}')
+
+
+def minify_server(stage):
+    """
+    Свой код сервера — в минифицированном виде (esbuild): без комментариев, локальные
+    имена сокращены. Архив лежит в открытом репозитории и в APK, а исходники сервера
+    закрытые. Раскладка файлов та же — пути воркеров, require и __dirname не меняются;
+    node_modules (открытые библиотеки) не трогаем. Возвращает версию сервера.
+    """
+    server_js = os.path.join(stage, 'server.js')
+    # Версия — из первой строки server.js, как её показывает приложение
+    m = re.search(r"'([^']+)'", open(server_js, encoding='utf-8').readline())
+    version = m.group(1) if m else None
+    files = [os.path.relpath(os.path.join(base, f), stage)
+             for base, _, names in os.walk(stage) for f in names if f.endswith('.js')]
+    print(f'== esbuild --minify: {len(files)} файлов')
+    subprocess.run(['npx', '-y', f'esbuild@{ESBUILD_VERSION}', *files,
+                    '--minify', '--format=cjs', '--platform=node', '--target=node20',
+                    '--legal-comments=none', '--charset=utf8', '--log-level=warning',
+                    '--outdir=.', '--outbase=.', '--allow-overwrite'],
+                   cwd=stage, check=True, shell=(os.name == 'nt'))
+    # После минификации первая строка — уже не `const version = '…'`, а приложение
+    # (ServerUpdater.currentVersion) берёт версию именно из первой строки server.js
+    body = open(server_js, encoding='utf-8').read()
+    with open(server_js, 'w', encoding='utf-8') as f:
+        f.write(f"// '{version}'\n" + body)
+    return version
 
 
 def copy_server_to_assets():

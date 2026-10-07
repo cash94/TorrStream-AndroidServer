@@ -11,7 +11,8 @@
 версия. Подпись — секреты `KEYSTORE_B64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`.
 
 **Код сервера** лежит в `server/`: `TorrStream-android-server.zip` и `version.json`
-(версия, sha256). Его берут и сборка, и кнопка «Обновить сервер» в приложении
+(версия, sha256). Свой код сервера в архиве минифицирован (esbuild) — исходники
+закрытые; открытые библиотеки (node_modules) — как есть. Его берут и сборка, и кнопка «Обновить сервер» в приложении
 (`raw.githubusercontent.com/.../main/server/`). Обновить его — на машине с исходниками
 сервера (закрытый `cash94/TorrStream`):
 `python tools/fetch-binaries.py --server-src C:/videoloop-server`, затем коммит `server/`.
