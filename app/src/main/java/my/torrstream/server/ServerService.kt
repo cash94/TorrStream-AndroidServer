@@ -27,6 +27,11 @@ import java.util.zip.ZipInputStream
  * телефон иначе усыпляет процессор и Wi-Fi, и телевизор теряет сервер посреди фильма.
  * Процессы — дочерние; упавший перезапускается, но не чаще [MAX_RESTARTS] раз за
  * [RESTART_WINDOW_MS].
+ *
+ * TorrServer бывает двух видов: вместе с сервером («Запускать вместе с сервером» —
+ * останавливается с ним) и сам по себе ([tsStandalone]: кнопка в карточке TorrServer
+ * или автозапуск при открытии приложения) — тогда остановка сервера его не трогает,
+ * и служба живёт, пока работает хоть что-то из двух.
  */
 class ServerService : Service() {
 
@@ -42,7 +47,22 @@ class ServerService : Service() {
             ACTION_TS_START -> if (running && tsProc == null && !tsExternal) {
                 Thread({ startTorrServerIfWanted() }, "ts-start").start()
             }
-            ACTION_TS_STOP -> stopTorrServer()
+            // TorrServer сам по себе — кнопкой или автозапуском, работает и без сервера
+            ACTION_TS_STANDALONE -> {
+                tsStandalone = true
+                acquireLocks()
+                if (tsProc == null) Thread({ startTorrServerStandalone() }, "ts-start").start()
+            }
+            ACTION_TS_STOP -> {
+                tsStandalone = false
+                stopTorrServer()
+                if (!running) stopSelf()
+            }
+            // Остановка сервера при TorrServer, запущенном самим по себе: он остаётся
+            ACTION_SERVER_STOP -> {
+                stopNode()
+                if (tsProc == null && !tsStandalone) stopSelf()
+            }
             else -> if (!running) {
                 running = true
                 acquireLocks()
@@ -54,6 +74,7 @@ class ServerService : Service() {
 
     override fun onDestroy() {
         running = false
+        tsStandalone = false
         nodeProc?.let { p -> try { p.destroy() } catch (_: Exception) { } }
         tsProc?.let { p -> try { p.destroy() } catch (_: Exception) { } }
         nodeProc = null
@@ -90,6 +111,7 @@ class ServerService : Service() {
      */
     private fun startTorrServerIfWanted() {
         val ctx = applicationContext
+        if (tsProc != null) return   // уже работает — запущен сам по себе
         val external = TorrServerInstaller.runningVersion()
         tsExternal = external != null
         when {
@@ -103,6 +125,36 @@ class ServerService : Service() {
         }
     }
 
+    /** TorrServer сам по себе: не смотрит на «запускать вместе с сервером» */
+    private fun startTorrServerStandalone() {
+        val ctx = applicationContext
+        val external = TorrServerInstaller.runningVersion()
+        tsExternal = external != null
+        when {
+            external != null -> {
+                torrServerState = "Работает (уже был запущен): $external"
+                log("TorrServer уже работает на порту ${Env.TORRSERVER_PORT} ($external) — свою копию не запускаем")
+            }
+            !TorrServerInstaller.isInstalled(ctx) -> torrServerState = "Не установлен"
+            else -> startTorrServer()
+        }
+        // Запускать было нечего и сервер не работает — службе незачем висеть
+        if (tsProc == null && !running) {
+            tsStandalone = false
+            stopSelf()
+        }
+    }
+
+    /** Только сервер TorrStream; TorrServer, запущенный сам по себе, остаётся */
+    private fun stopNode() {
+        running = false
+        val p = nodeProc
+        nodeProc = null    // onExit не станет перезапускать
+        p?.let { try { it.destroy() } catch (_: Exception) { } }
+        serverState = "Остановлен"
+        log("Сервер TorrStream остановлен")
+    }
+
     private fun stopTorrServer() {
         val p = tsProc ?: return
         tsProc = null      // onExit не станет перезапускать
@@ -111,8 +163,12 @@ class ServerService : Service() {
         log("TorrServer остановлен")
     }
 
+    @Synchronized
     private fun startTorrServer() {
         val ctx = applicationContext
+        // Автозапуск при открытии и запуск вместе с сервером могут прийти разом —
+        // второй экземпляр упал бы на занятом порту
+        if (tsProc != null) return
         val bin = TorrServerInstaller.binary(ctx)
         val data = TorrServerInstaller.dataDir(ctx)
         val p = try {
@@ -266,7 +322,7 @@ class ServerService : Service() {
     }
 
     private fun onExit(p: Process, code: Int, name: String, restarts: ArrayList<Long>, restart: () -> Unit) {
-        if (!running) return
+        if (!running && !tsStandalone) return
         if (p !== nodeProc && p !== tsProc) return
         log("$name завершился, код $code")
         if (p === nodeProc) { nodeProc = null; serverState = "Перезапуск…" }
@@ -283,13 +339,16 @@ class ServerService : Service() {
             restarts += now
         }
         Thread.sleep(RESTART_DELAY_MS)
-        if (running) restart()
+        // Сервер перезапускаем, пока он нужен; TorrServer — пока нужен сервер или он сам
+        val wanted = if (name.startsWith("TorrServer")) running || tsStandalone else running
+        if (wanted) restart()
     }
 
     // ==================== СОН ====================
 
     @SuppressLint("WakelockTimeout")
     private fun acquireLocks() {
+        if (wakeLock != null) return   // уже держим: сервер и TorrServer — одна служба
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "TorrStream:server").apply { acquire() }
@@ -349,6 +408,8 @@ class ServerService : Service() {
 
         const val ACTION_TS_START = "my.torrstream.server.TS_START"
         const val ACTION_TS_STOP = "my.torrstream.server.TS_STOP"
+        const val ACTION_TS_STANDALONE = "my.torrstream.server.TS_STANDALONE"
+        const val ACTION_SERVER_STOP = "my.torrstream.server.SERVER_STOP"
 
         @Volatile var running = false; private set
         @Volatile var serverState = "Остановлен"; private set
@@ -356,6 +417,11 @@ class ServerService : Service() {
         @Volatile private var nodeProc: Process? = null
         @Volatile private var tsProc: Process? = null
         @Volatile private var tsExternal = false
+        /** TorrServer запущен сам по себе — не вместе с сервером */
+        @Volatile var tsStandalone = false; private set
+
+        /** TorrServer работает или запускается — свой процесс или запущенный сам по себе */
+        val tsActive: Boolean get() = tsProc != null || tsStandalone
         private val nodeRestarts = ArrayList<Long>()
         private val tsRestarts = ArrayList<Long>()
 
@@ -399,8 +465,22 @@ class ServerService : Service() {
             else ctx.startService(intent)
         }
 
+        /** Остановить сервер. TorrServer, запущенный сам по себе, продолжает работать */
         fun stop(ctx: Context) {
-            ctx.stopService(Intent(ctx, ServerService::class.java))
+            if (tsStandalone && tsProc != null) send(ctx, ACTION_SERVER_STOP)
+            else ctx.stopService(Intent(ctx, ServerService::class.java))
+        }
+
+        /** TorrServer сам по себе, без сервера: кнопка в карточке и автозапуск */
+        fun startTorrServer(ctx: Context) {
+            init(ctx)
+            send(ctx, ACTION_TS_STANDALONE)
+        }
+
+        private fun send(ctx: Context, action: String) {
+            val intent = Intent(ctx, ServerService::class.java).setAction(action)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(intent)
+            else ctx.startService(intent)
         }
 
         /** Перезапуск — после обновления кода сервера */
@@ -410,12 +490,14 @@ class ServerService : Service() {
             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ start(ctx) }, 2500)
         }
 
-        /** Запустить/остановить TorrServer при уже работающем сервере */
+        /**
+         * Запустить TorrServer вместе с уже работающим сервером / остановить TorrServer
+         * (любой: и вместе с сервером, и запущенный сам по себе)
+         */
         fun torrServer(ctx: Context, start: Boolean) {
-            if (!running) return
-            val intent = Intent(ctx, ServerService::class.java).setAction(if (start) ACTION_TS_START else ACTION_TS_STOP)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(intent)
-            else ctx.startService(intent)
+            if (start && !running) return
+            if (!start && !running && !tsActive) return
+            send(ctx, if (start) ACTION_TS_START else ACTION_TS_STOP)
         }
     }
 }

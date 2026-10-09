@@ -21,7 +21,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 
 /**
- * Главный экран: адрес для телевизора, запуск/остановка, TorrServer и обслуживание.
+ * Главный экран: адрес для телевизора, запуск/остановка, TorrServer, автозапуск и обслуживание.
  * Состояние сервера с версией — значком в шапке, TorrServer — в своей карточке.
  * Журнал — отдельным экраном (LogActivity).
  *
@@ -46,6 +46,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tsUpdateBtn: Button
     private lateinit var tsUpdateStatus: TextView
     private lateinit var tsActions: LinearLayout
+    private lateinit var tsStartStop: Button
+    private lateinit var bootHint: TextView
+    private var lastTsActive: Boolean? = null
     private var lastRunning: Boolean? = null
 
     private val tick = object : Runnable {
@@ -59,6 +62,11 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         ServerService.init(this)
         setContentView(buildLayout())
+        // Автозапуск при открытии — только при настоящем открытии, не при повороте экрана
+        if (savedInstanceState == null) {
+            Autostart.runOnOpen(this)
+            handler.postDelayed({ refresh() }, 300)
+        }
         // На телевизоре фокус сразу на главной кнопке — иначе первое нажатие
         // пульта уходит на поиск, куда его поставить
         if (Ui.isTv(this)) startStop.requestFocus()
@@ -168,6 +176,12 @@ class MainActivity : AppCompatActivity() {
         tsCard.addView(tsRow, Ui.matchWidth(0).apply { bottomMargin = dp(8) })
         tsInstallBtn = Ui.button(this, "Установить TorrServer (~64 МБ)", Ui.Kind.SECONDARY) { installTorrServer() }
         tsCard.addView(tsInstallBtn, Ui.matchWidth())
+        // Запуск TorrServer сам по себе, без сервера: остановка сервера его не трогает
+        tsStartStop = Ui.button(this, "Запустить TorrServer", Ui.Kind.SECONDARY) {
+            if (ServerService.tsActive) ServerService.torrServer(this, false) else ServerService.startTorrServer(this)
+            handler.postDelayed({ refresh() }, 300)
+        }
+        tsCard.addView(tsStartStop, Ui.matchWidth().apply { bottomMargin = dp(10) })
         tsEnabled = Ui.ToggleRow(this, "Запускать вместе с сервером") { on ->
             TorrServerInstaller.setEnabled(this, on)
             ServerService.torrServer(this, on)
@@ -186,6 +200,34 @@ class MainActivity : AppCompatActivity() {
         }
         tsCard.addView(tsUpdateStatus)
         right.addView(tsCard, Ui.matchWidth())
+
+        // Автозапуск
+        val autoCard = Ui.card(this, "Автозапуск")
+        autoCard.addView(Ui.ToggleRow(this, "Открывать приложение при включении устройства") { on ->
+            Autostart.setAppOnBoot(this, on)
+            // Android 10+: окно из фона откроется только с разрешением «Поверх других
+            // приложений» — сразу ведём туда
+            if (on && !Autostart.canOpenFromBackground(this) && !Autostart.requestOverlay(this)) {
+                android.widget.Toast.makeText(this, "На устройстве нет экрана этого разрешения — " +
+                    "сервер всё равно запустится при включении, если включён его автозапуск", android.widget.Toast.LENGTH_LONG).show()
+            }
+            refresh()
+        }.apply { checked = Autostart.appOnBoot(this@MainActivity) }, Ui.matchWidth())
+        bootHint = Ui.text(this, 12f, Ui.WARN).apply {
+            text = "Чтобы приложение открывалось само, разрешите ему «Поверх других приложений» " +
+                "(Android 10 и новее). Без разрешения при включении запустятся только сервер и TorrServer."
+            setPadding(dp(4), dp(6), 0, dp(4))
+            setLineSpacing(0f, 1.15f)
+            visibility = View.GONE
+        }
+        autoCard.addView(bootHint)
+        autoCard.addView(Ui.ToggleRow(this, "Запускать сервер при открытии приложения") { on ->
+            Autostart.setServerOnOpen(this, on)
+        }.apply { checked = Autostart.serverOnOpen(this@MainActivity) }, Ui.matchWidth(dp(8)))
+        autoCard.addView(Ui.ToggleRow(this, "Запускать TorrServer при открытии приложения") { on ->
+            Autostart.setTsOnOpen(this, on)
+        }.apply { checked = Autostart.tsOnOpen(this@MainActivity) }, Ui.matchWidth(dp(8)))
+        right.addView(autoCard, Ui.matchWidth(gap))
 
         // Обслуживание
         val toolsCard = Ui.card(this, "Обслуживание")
@@ -259,11 +301,13 @@ class MainActivity : AppCompatActivity() {
         }
 
         val tsProgress = TorrServerInstaller.progress
+        // Состояние службы — пока работает сервер или TorrServer сам по себе
+        val tsLive = running || ServerService.tsActive
         val ts = when {
             tsProgress >= 0 -> "Скачиваю… $tsProgress%"
             TorrServerInstaller.lastError != null -> "Ошибка загрузки: ${TorrServerInstaller.lastError}"
-            !running && TorrServerInstaller.isInstalled(this) -> "Установлен ${TorrServerInstaller.version(this) ?: ""}".trim()
-            !running -> "Не установлен"
+            !tsLive && TorrServerInstaller.isInstalled(this) -> "Установлен ${TorrServerInstaller.version(this) ?: ""}".trim()
+            !tsLive -> "Не установлен"
             else -> ServerService.torrServerState
         }
         tsRow.set(ts, if (tsProgress >= 0) Ui.WARN else colorOf(ts))
@@ -278,6 +322,14 @@ class MainActivity : AppCompatActivity() {
         val downloading = tsProgress >= 0
         val focused = currentFocus
         show(tsInstallBtn, !installed && !downloading)
+        show(tsStartStop, installed && !downloading)
+        val tsActive = ServerService.tsActive
+        if (lastTsActive != tsActive) {
+            lastTsActive = tsActive
+            tsStartStop.text = if (tsActive) "Остановить TorrServer" else "Запустить TorrServer"
+            Ui.style(tsStartStop, if (tsActive) Ui.Kind.DANGER else Ui.Kind.SECONDARY)
+        }
+        show(bootHint, Autostart.appOnBoot(this) && !Autostart.canOpenFromBackground(this))
         show(tsEnabled, installed)
         show(tsActions, installed && !downloading)
         val tsUpd = TorrServerInstaller.updateStatus ?: ""
@@ -333,10 +385,14 @@ class MainActivity : AppCompatActivity() {
                 ServerService.log("TorrServer обновлён до ${TorrServerInstaller.version(ctx)}")
                 // Работающий перезапускаем уже с новым файлом. Пауза — чтобы старый
                 // процесс успел освободить порт 8090: занятый порт сервис принял бы
-                // за чужой TorrServer и свой не запустил
-                if (ServerService.running && TorrServerInstaller.enabled(ctx)) {
+                // за чужой TorrServer и свой не запустил. Запущенный сам по себе —
+                // снова сам по себе, вместе с сервером — снова с сервером
+                val standalone = ServerService.tsStandalone
+                if (ServerService.tsActive || (ServerService.running && TorrServerInstaller.enabled(ctx))) {
                     handler.post { ServerService.torrServer(ctx, false) }
-                    handler.postDelayed({ ServerService.torrServer(ctx, true) }, 2500)
+                    handler.postDelayed({
+                        if (standalone) ServerService.startTorrServer(ctx) else ServerService.torrServer(ctx, true)
+                    }, 2500)
                 }
             }
         }, "ts-update").start()
