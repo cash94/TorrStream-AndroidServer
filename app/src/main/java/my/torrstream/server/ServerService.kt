@@ -60,6 +60,7 @@ class ServerService : Service() {
             }
             // Остановка сервера при TorrServer, запущенном самим по себе: он остаётся
             ACTION_SERVER_STOP -> {
+                AutoUpdate.stop()
                 stopNode()
                 if (tsProc == null && !tsStandalone) stopSelf()
             }
@@ -67,12 +68,15 @@ class ServerService : Service() {
                 running = true
                 acquireLocks()
                 Thread({ startAll() }, "server-start").start()
+                // Проверка обновления сервера раз в полчаса, пока он работает
+                AutoUpdate.start(applicationContext)
             }
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
+        AutoUpdate.stop()
         running = false
         tsStandalone = false
         nodeProc?.let { p -> try { p.destroy() } catch (_: Exception) { } }

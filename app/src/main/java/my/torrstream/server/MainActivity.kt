@@ -40,6 +40,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var updateStatus: TextView
     private lateinit var batteryBtn: Button
     private lateinit var updateBtn: Button
+    private var lastUpdateAvailable: Boolean? = null
     private lateinit var tsInstallBtn: Button
     private lateinit var tsEnabled: Ui.ToggleRow
     private lateinit var tsRemoveBtn: Button
@@ -242,6 +243,13 @@ class MainActivity : AppCompatActivity() {
         toolsCard.addView(toolsRow, Ui.matchWidth())
         updateStatus = Ui.text(this, 13f, Ui.MUTED).apply { setPadding(dp(4), dp(6), 0, 0) }
         toolsCard.addView(updateStatus)
+        // Проверка — раз в полчаса, пока сервер работает (AutoUpdate); с галочкой новая
+        // версия ставится сама, когда никто не смотрит
+        toolsCard.addView(Ui.ToggleRow(this, "Устанавливать обновления сервера автоматически") { on ->
+            ServerUpdater.setAutoInstall(this, on)
+            // Обновление уже найдено — ставим сейчас, а не через полчаса
+            if (on && ServerUpdater.available != null) AutoUpdate.now(applicationContext)
+        }.apply { checked = ServerUpdater.autoInstall(this@MainActivity) }, Ui.matchWidth(dp(10)))
         batteryBtn = Ui.button(this, "Разрешить работу в фоне") { requestIgnoreBattery() }
         toolsCard.addView(batteryBtn, Ui.matchWidth(dp(10)))
         left.addView(toolsCard, Ui.matchWidth(gap))
@@ -313,6 +321,14 @@ class MainActivity : AppCompatActivity() {
         tsRow.set(ts, if (tsProgress >= 0) Ui.WARN else colorOf(ts))
 
         val battery = ignoringBattery()
+
+        // Есть новая версия — кнопка выделена, номер версии в строке под ней (на
+        // кнопке он не помещается в половину ширины телефона)
+        val hasUpdate = ServerUpdater.available != null
+        if (lastUpdateAvailable != hasUpdate) {
+            lastUpdateAvailable = hasUpdate
+            Ui.style(updateBtn, if (hasUpdate) Ui.Kind.PRIMARY else Ui.Kind.SECONDARY)
+        }
 
         val upd = ServerUpdater.status ?: ""
         if (updateStatus.text.toString() != upd) updateStatus.text = upd

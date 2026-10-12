@@ -18,6 +18,10 @@ import java.security.MessageDigest
  * tools/fetch-binaries.py --server-src. Новый архив — тот, чей sha256 не совпадает
  * с установленным; скачанный проверяется по тому же sha256. Он берётся вместо
  * встроенного, пока не установлен APK новее него (ServerService.prepareServerApp).
+ *
+ * Пока сервер работает, AutoUpdate раз в полчаса зовёт [checkAvailable]: есть новая
+ * версия — [available] и подсказка на кнопке, а с включённой [autoInstall] она
+ * скачивается и ставится сама, когда никто не смотрит.
  */
 object ServerUpdater {
     private const val BASE = "https://raw.githubusercontent.com/cash94/TorrStream-AndroidServer/main/server/"
@@ -28,10 +32,17 @@ object ServerUpdater {
         private set
     @Volatile var busy = false
         private set
+    /** Версия на сервере обновлений, если она новее установленной («TorrStream.1.0.52») */
+    @Volatile var available: String? = null
+        private set
 
     fun downloaded(ctx: Context) = File(ctx.filesDir, "server-update.zip")
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    /** Ставить обновления сервера самому (галочка в «Обслуживании») */
+    fun autoInstall(ctx: Context) = prefs(ctx).getBoolean("auto_install", false)
+    fun setAutoInstall(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("auto_install", on).apply()
 
     /** Когда скачан архив, который сейчас используется (0 — встроенный из APK) */
     fun downloadedAt(ctx: Context) = prefs(ctx).getLong("downloaded_at", 0L)
@@ -64,6 +75,37 @@ object ServerUpdater {
     }
 
     /**
+     * Есть ли новая версия — без скачивания. Возвращает её номер или null (нет новой
+     * или проверить не вышло). Блокирующий — звать не с главного потока.
+     */
+    fun checkAvailable(ctx: Context): String? {
+        if (busy) return available
+        return try {
+            val info = JSONObject(String(get(BASE + "version.json")))
+            val sha = info.optString("sha256").lowercase()
+            if (sha.length != 64 || sha == installedSha(ctx)) {
+                available = null
+                null
+            } else {
+                val version = info.optString("version").ifEmpty { sha.take(8) }
+                available = version
+                if (!autoInstall(ctx)) status = "Доступна версия ${short(version)} — нажмите «Обновить сервер»"
+                version
+            }
+        } catch (e: Exception) {
+            null   // нет сети — проверим в следующий раз, ошибку не показываем
+        }
+    }
+
+    /** «TorrStream.1.0.52» → «1.0.52» */
+    fun short(version: String) = version.removePrefix("TorrStream.")
+
+    /** Скачано, но сервер ещё не перезапущен (ждёт, пока никто не смотрит) */
+    fun pending(text: String) {
+        status = text
+    }
+
+    /**
      * Сверяет version.json из репозитория с установленным архивом и, если тот другой,
      * скачивает новый. Возвращает true, если скачана новая версия (сервер надо
      * перезапустить). Блокирующий — звать не с главного потока.
@@ -78,6 +120,7 @@ object ServerUpdater {
             if (sha.length != 64) throw IOException("нет sha256 в version.json")
             if (sha == installedSha(ctx)) {
                 status = "Установлена последняя версия"
+                available = null
                 return false
             }
             status = "Скачиваю ${version ?: "обновление"}…"
@@ -94,6 +137,7 @@ object ServerUpdater {
                 .putLong("downloaded_at", System.currentTimeMillis())
                 .apply()
             status = "Скачано: ${version ?: sha.take(8)}"
+            available = null
             return true
         } catch (e: Exception) {
             status = "Ошибка обновления: ${e.message}"
