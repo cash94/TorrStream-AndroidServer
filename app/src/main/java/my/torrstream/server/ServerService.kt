@@ -119,13 +119,23 @@ class ServerService : Service() {
         val external = TorrServerInstaller.runningVersion()
         tsExternal = external != null
         when {
-            external != null -> {
-                torrServerState = "Работает (уже был запущен): $external"
-                log("TorrServer уже работает на порту ${Env.TORRSERVER_PORT} ($external) — свою копию не запускаем")
-            }
+            external != null -> externalTorrServer(external)
             !TorrServerInstaller.isInstalled(ctx) -> torrServerState = "Не установлен"
             !TorrServerInstaller.enabled(ctx) -> torrServerState = "Установлен, не запускается (выключено)"
             running -> startTorrServer()
+        }
+    }
+
+    /** На порту уже работает чужой TorrServer (TorrServe) — свою копию не запускаем */
+    private fun externalTorrServer(version: String) {
+        if (TorrServerInstaller.isMatrix(version)) {
+            torrServerState = "Работает (уже был запущен): $version"
+            log("TorrServer уже работает на порту ${Env.TORRSERVER_PORT} ($version) — свою копию не запускаем")
+        } else {
+            // Silo и прочие не-MatriX: API другой, телевизор с ним работать не будет
+            torrServerState = "Работает (уже был запущен): $version — несовместим, нужен MatriX"
+            log("На порту ${Env.TORRSERVER_PORT} работает TorrServer $version — с TorrStream несовместим " +
+                "(нужен MatriX). Закройте его, тогда запустится свой ${TorrServerInstaller.PINNED_TAG}")
         }
     }
 
@@ -135,10 +145,7 @@ class ServerService : Service() {
         val external = TorrServerInstaller.runningVersion()
         tsExternal = external != null
         when {
-            external != null -> {
-                torrServerState = "Работает (уже был запущен): $external"
-                log("TorrServer уже работает на порту ${Env.TORRSERVER_PORT} ($external) — свою копию не запускаем")
-            }
+            external != null -> externalTorrServer(external)
             !TorrServerInstaller.isInstalled(ctx) -> torrServerState = "Не установлен"
             else -> startTorrServer()
         }
@@ -173,6 +180,23 @@ class ServerService : Service() {
         // Автозапуск при открытии и запуск вместе с сервером могут прийти разом —
         // второй экземпляр упал бы на занятом порту
         if (tsProc != null) return
+        // Скачан несовместимый (Silo из releases/latest старых версий) — сначала меняем
+        // на закреплённый MatriX; не вышло — не запускаем: с Silo телевизор не работает
+        if (TorrServerInstaller.isStale(ctx)) {
+            val old = TorrServerInstaller.version(ctx) ?: "?"
+            log("TorrServer $old несовместим с TorrStream — меняю на ${TorrServerInstaller.PINNED_TAG}")
+            torrServerState = "Скачиваю ${TorrServerInstaller.PINNED_TAG}…"
+            try {
+                TorrServerInstaller.replaceIfStale(ctx)
+                log("TorrServer ${TorrServerInstaller.PINNED_TAG} установлен")
+            } catch (e: Exception) {
+                val msg = e.message ?: e.javaClass.simpleName
+                TorrServerInstaller.lastError = msg
+                torrServerState = "Не запустился: не удалось скачать ${TorrServerInstaller.PINNED_TAG} ($msg)"
+                log("TorrServer: не удалось скачать ${TorrServerInstaller.PINNED_TAG}: $msg")
+                return
+            }
+        }
         val bin = TorrServerInstaller.binary(ctx)
         val data = TorrServerInstaller.dataDir(ctx)
         val p = try {
@@ -492,6 +516,46 @@ class ServerService : Service() {
             if (!running) return
             stop(ctx)
             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ start(ctx) }, 2500)
+        }
+
+        /**
+         * Перезапуск работающего TorrServer — после замены файла. Пауза — чтобы старый
+         * процесс успел освободить порт 8090: занятый порт сервис принял бы за чужой
+         * TorrServer и свой не запустил. Запущенный сам по себе — снова сам по себе,
+         * вместе с сервером — снова с сервером. Звать можно с любого потока.
+         */
+        fun restartTorrServer(ctx: Context) {
+            val standalone = tsStandalone
+            if (!tsActive && !(running && TorrServerInstaller.enabled(ctx))) return
+            val main = android.os.Handler(android.os.Looper.getMainLooper())
+            main.post { torrServer(ctx, false) }
+            main.postDelayed({ if (standalone) startTorrServer(ctx) else torrServer(ctx, true) }, 2500)
+        }
+
+        /**
+         * Открытие приложения: скачанный раньше несовместимый TorrServer (Silo) меняем на
+         * [TorrServerInstaller.PINNED_TAG], не дожидаясь запуска. Своя работающая копия
+         * сверяется по /echo — не MatriX тоже меняем и перезапускаем.
+         */
+        fun replaceIncompatibleTorrServer(ctx: Context) {
+            Thread({
+                val own = tsProc != null
+                val echo = if (own) TorrServerInstaller.runningVersion() else null
+                try {
+                    val old = TorrServerInstaller.version(ctx) ?: "?"
+                    var replaced = TorrServerInstaller.replaceIfStale(ctx)
+                    if (!replaced && own && tsProc != null && echo != null && !TorrServerInstaller.isMatrix(echo)) {
+                        TorrServerInstaller.install(ctx)
+                        replaced = true
+                    }
+                    if (!replaced) return@Thread
+                    log("TorrServer ${echo ?: old} несовместим с TorrStream — заменён на ${TorrServerInstaller.PINNED_TAG}")
+                    if (own) restartTorrServer(ctx)
+                } catch (e: Exception) {
+                    TorrServerInstaller.lastError = e.message ?: e.javaClass.simpleName
+                    log("TorrServer: не удалось скачать ${TorrServerInstaller.PINNED_TAG}: ${e.message}")
+                }
+            }, "ts-replace").start()
         }
 
         /**

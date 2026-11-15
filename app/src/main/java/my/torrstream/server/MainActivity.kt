@@ -66,6 +66,8 @@ class MainActivity : AppCompatActivity() {
         // Автозапуск при открытии — только при настоящем открытии, не при повороте экрана
         if (savedInstanceState == null) {
             Autostart.runOnOpen(this)
+            // Скачанный старыми версиями Silo (releases/latest) — несовместим, меняем на MatriX
+            ServerService.replaceIncompatibleTorrServer(applicationContext)
             handler.postDelayed({ refresh() }, 300)
         }
         // На телевизоре фокус сразу на главной кнопке — иначе первое нажатие
@@ -399,17 +401,8 @@ class MainActivity : AppCompatActivity() {
         Thread({
             if (TorrServerInstaller.update(ctx)) {
                 ServerService.log("TorrServer обновлён до ${TorrServerInstaller.version(ctx)}")
-                // Работающий перезапускаем уже с новым файлом. Пауза — чтобы старый
-                // процесс успел освободить порт 8090: занятый порт сервис принял бы
-                // за чужой TorrServer и свой не запустил. Запущенный сам по себе —
-                // снова сам по себе, вместе с сервером — снова с сервером
-                val standalone = ServerService.tsStandalone
-                if (ServerService.tsActive || (ServerService.running && TorrServerInstaller.enabled(ctx))) {
-                    handler.post { ServerService.torrServer(ctx, false) }
-                    handler.postDelayed({
-                        if (standalone) ServerService.startTorrServer(ctx) else ServerService.torrServer(ctx, true)
-                    }, 2500)
-                }
+                // Работающий перезапускаем уже с новым файлом
+                ServerService.restartTorrServer(ctx)
             }
         }, "ts-update").start()
         handler.postDelayed({ refresh() }, 300)

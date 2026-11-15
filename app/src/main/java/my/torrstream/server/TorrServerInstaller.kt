@@ -1,7 +1,6 @@
 package my.torrstream.server
 
 import android.content.Context
-import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -12,9 +11,16 @@ import java.net.URL
  * TorrServer: скачать официальную сборку под Android (YouROK/TorrServer) в память
  * приложения и проверить, не работает ли он уже на localhost:8090 (например, TorrServe —
  * тогда свою копию не запускаем, сервер TorrStream ходит в тот).
+ *
+ * Версия закреплена — [PINNED_TAG], последний MatriX. С ноября 2026 апстрим выпускает
+ * ветку Silo с другим API, с которым TorrStream не работает, поэтому releases/latest
+ * не берём. Скачанную раньше не-MatriX версию (Silo) меняем на [PINNED_TAG] перед
+ * запуском и при открытии приложения — см. [replaceIfStale].
  */
 object TorrServerInstaller {
-    private const val RELEASES = "https://api.github.com/repos/YouROK/TorrServer/releases/latest"
+    /** Закреплённая версия TorrServer: последний MatriX (Silo несовместим с API MatriX) */
+    const val PINNED_TAG = "MatriX.150"
+    private const val DOWNLOAD_BASE = "https://github.com/YouROK/TorrServer/releases/download/$PINNED_TAG/"
 
     /** GET с таймаутами; GitHub отдаёт файлы релиза переадресацией — по ней идём сами */
     private fun open(url: String, connectMs: Int, readMs: Int): HttpURLConnection {
@@ -49,6 +55,23 @@ object TorrServerInstaller {
     fun version(ctx: Context): String? =
         ctx.getSharedPreferences("torrserver", Context.MODE_PRIVATE).getString("version", null)
 
+    /** Совместимая ли версия: TorrStream работает только с API MatriX (Silo — другой) */
+    fun isMatrix(version: String?) = version?.startsWith("MatriX.") == true
+
+    /** Скачан несовместимый TorrServer (Silo из releases/latest старых версий приложения) */
+    fun isStale(ctx: Context) = isInstalled(ctx) && !isMatrix(version(ctx))
+
+    /**
+     * Скачанный несовместимый TorrServer меняет на [PINNED_TAG]. true — заменён: если
+     * он работал, его надо перезапустить. Блокирующий — звать не с главного потока.
+     */
+    @Synchronized
+    fun replaceIfStale(ctx: Context): Boolean {
+        if (!isStale(ctx)) return false
+        install(ctx)
+        return true
+    }
+
     /** «Запускать TorrServer вместе с сервером» */
     fun enabled(ctx: Context) =
         ctx.getSharedPreferences("torrserver", Context.MODE_PRIVATE).getBoolean("enabled", true)
@@ -76,28 +99,22 @@ object TorrServerInstaller {
     @Volatile var checking = false
         private set
 
-    private fun latestRelease(): JSONObject = open(RELEASES, 20000, 60000).let { c ->
-        try { JSONObject(c.inputStream.bufferedReader().readText()) } finally { c.disconnect() }
-    }
-
     /**
-     * Проверяет последний релиз и, если он новее установленного, ставит его поверх.
-     * true — обновлён: работающий TorrServer надо перезапустить (старый процесс
+     * «Обновить»: версия закреплена — ставит [PINNED_TAG], если установлена другая.
+     * true — заменён: работающий TorrServer надо перезапустить (старый процесс
      * так и работает со старым файлом). Блокирующий — звать не с главного потока.
      */
     fun update(ctx: Context): Boolean {
         checking = true
         updateStatus = "Проверяю обновление…"
         try {
-            val rel = latestRelease()
-            val tag = rel.optString("tag_name")
-            if (tag.isNotEmpty() && tag == version(ctx)) {
-                updateStatus = "Установлена последняя версия"
+            if (version(ctx) == PINNED_TAG) {
+                updateStatus = "Установлена $PINNED_TAG — совместимая с TorrStream версия"
                 return false
             }
-            updateStatus = "Скачиваю $tag…"
-            install(ctx, rel)
-            updateStatus = "Обновлён до $tag"
+            updateStatus = "Скачиваю $PINNED_TAG…"
+            install(ctx)
+            updateStatus = "Установлена $PINNED_TAG"
             return true
         } catch (e: Exception) {
             updateStatus = "Ошибка обновления: ${e.message ?: e.javaClass.simpleName}"
@@ -107,21 +124,19 @@ object TorrServerInstaller {
         }
     }
 
-    /** Скачивает последнюю версию. Блокирующий — звать не с главного потока */
-    fun install(ctx: Context, release: JSONObject? = null) {
+    /**
+     * Скачивает закреплённую версию ([PINNED_TAG]) прямой ссылкой на файл релиза, без
+     * GitHub API. Блокирующий — звать не с главного потока. Synchronized: замена при
+     * открытии приложения и при запуске TorrServer может прийти разом — один файл.
+     */
+    @Synchronized
+    fun install(ctx: Context) {
         val suffix = Env.torrServerAsset ?: throw IOException("Процессор телефона не поддерживается")
         lastError = null
         progress = 0
         try {
-            val json = release ?: latestRelease()
-            val tag = json.optString("tag_name")
-            val assets = json.optJSONArray("assets") ?: throw IOException("В релизе нет файлов")
-            var url: String? = null
-            for (i in 0 until assets.length()) {
-                val a = assets.getJSONObject(i)
-                if (a.optString("name") == "TorrServer-$suffix") url = a.optString("browser_download_url")
-            }
-            if (url == null) throw IOException("Нет сборки TorrServer-$suffix")
+            val tag = PINNED_TAG
+            val url = DOWNLOAD_BASE + "TorrServer-$suffix"
 
             val target = binary(ctx)
             target.parentFile?.mkdirs()
