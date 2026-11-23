@@ -239,8 +239,12 @@ class ServerService : Service() {
         val extraEnv = File(ctx.filesDir, "server.env").takeIf { it.isFile }?.readLines()
             ?.map { it.trim() }?.filter { it.contains('=') && !it.startsWith("#") }.orEmpty()
         val script = File(Env.serverApp(ctx), "server.js").absolutePath
+        // Корневые сертификаты — встроенные в Node (список Mozilla). Termux с 2026-10-21
+        // (nodejs-lts 24.19+) собирает Node с --openssl-use-def-ca-store: он доверяет только
+        // хранилищу OpenSSL, а системная папка Android ему не подходит (см. SSL_CERT_DIR
+        // ниже) — любой https-запрос падал с «fetch failed», включая зеркало фронта
         val cmd = if (debugBin != null) listOf(bin.absolutePath) + extraArgs
-        else listOf(bin.absolutePath) + extraArgs + script
+        else listOf(bin.absolutePath, "--use-bundled-ca") + extraArgs + script
         val pb = ProcessBuilder(cmd).directory(home).redirectErrorStream(true)
         pb.environment().apply {
             put("PORT", Env.SERVER_PORT.toString())
@@ -250,8 +254,11 @@ class ServerService : Service() {
             put("FFPROBE_PATH", Env.ffprobe(ctx).absolutePath)
             // Библиотеки Node (libssl.so.3, libicuuc.so.78…) — по ссылкам из prepareNodeLibs
             put("LD_LIBRARY_PATH", Env.nodeLibDir(ctx).absolutePath)
-            // Корневые сертификаты — системные Android: у OpenSSL из Termux свой путь,
-            // которого на телефоне нет. DNS — системный (bionic), TORRSTREAM_DNS не нужен
+            // Системные сертификаты Android для OpenSSL из Termux (свой путь у него
+            // зашит под Termux). Для Node этого мало: файлы здесь названы по старому
+            // хешу (subject_hash_old), OpenSSL 3 ищет по новому и их не находит —
+            // поэтому node запускается с --use-bundled-ca (см. cmd выше).
+            // DNS — системный (bionic), TORRSTREAM_DNS не нужен
             put("SSL_CERT_DIR", "/system/etc/security/cacerts")
             // Конфиг OpenSSL — свой, пустой. Иначе OpenSSL из Termux читает зашитый
             // /data/data/com.termux/files/usr/etc/tls/openssl.cnf: без Termux файла нет
